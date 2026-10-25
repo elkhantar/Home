@@ -1,6 +1,7 @@
 package com.majnioui.tv.channels;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.SharedPreferences;
 import android.content.res.ColorStateList;
 import android.graphics.Bitmap;
@@ -22,12 +23,15 @@ import android.view.SurfaceView;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
+import android.text.InputType;
 import android.widget.BaseAdapter;
+import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ListView;
 import android.widget.TextView;
+import android.widget.Toast;
 
 import androidx.media3.common.C;
 import androidx.media3.common.MediaItem;
@@ -36,6 +40,7 @@ import androidx.media3.common.PlaybackException;
 import androidx.media3.common.Player;
 import androidx.media3.common.VideoSize;
 import androidx.media3.datasource.DefaultHttpDataSource;
+import androidx.media3.exoplayer.DefaultLoadControl;
 import androidx.media3.exoplayer.ExoPlayer;
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory;
 
@@ -51,11 +56,15 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
- * Live channels from free streams the broadcasters publish (see ChannelList), like a TV's own channel
- * app: it opens on the last channel, full screen. OK opens the channel list on the left (Up/Down to
- * move, Left/Right to jump between groups, OK to watch, Back to close); without it, Up/Down and
- * CH+/CH- switch channels and Back leaves. The list is a ListView, so only the rows on screen exist,
- * however many channels there are.
+ * Free IPTV: live channels from an M3U playlist (see ChannelList), like a TV's own channel app: it
+ * opens on the last channel, full screen. OK opens the channel list on the left (Up/Down to move,
+ * Left/Right to jump between groups, OK to watch, hold OK or Menu to edit or remove a channel, Back to
+ * close); without it, Up/Down and CH+/CH- switch channels and Back leaves. Below the channels, "My list"
+ * adds a channel, changes the playlist link, reloads it and undoes the edits. The list is a ListView, so
+ * only the rows on screen exist, however many channels there are.
+ *
+ * One player plays every channel: switching only changes what it plays, and playback starts after a
+ * second of video rather than ExoPlayer's default of two and a half.
  */
 public class MainActivity extends Activity {
     private static final String TAG = "Channels";
@@ -71,7 +80,28 @@ public class MainActivity extends Activity {
         ARABIC.put("Entertainment", "الترفيه");
         ARABIC.put("Documentary", "الوثائقيات");
         ARABIC.put("Religious", "القنوات الدينية");
+        ARABIC.put("General", "عامة");
+        ARABIC.put("Sports", "الرياضة");
+        ARABIC.put("Music", "الموسيقى");
+        ARABIC.put("Family", "العائلة");
+        ARABIC.put("Business", "الاقتصاد");
     }
+
+    /** The rows under the channels, in the "My list" group. */
+    private enum Action {
+        ADD("＋  Add a channel"),
+        PLAYLIST("Playlist link"),
+        RELOAD("Reload the playlist"),
+        RESET("Undo my changes");
+
+        final String label;
+
+        Action(String label) {
+            this.label = label;
+        }
+    }
+
+    private static final String MY_LIST = "My list";
 
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ExecutorService io = Executors.newFixedThreadPool(3);
@@ -81,7 +111,7 @@ public class MainActivity extends Activity {
     private SharedPreferences prefs;
 
     private List<ChannelList.Channel> channels = new ArrayList<>();
-    /** List rows: a String is a group header, an Integer the index of a channel. */
+    /** List rows: a String is a group header, an Integer the index of a channel, an Action an action. */
     private final List<Object> rows = new ArrayList<>();
     private int current = -1;
 
@@ -96,6 +126,14 @@ public class MainActivity extends Activity {
     private TextView menuStatus;
     private final RowAdapter adapter = new RowAdapter();
     private ExoPlayer player;
+    private final DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory()
+            .setAllowCrossProtocolRedirects(true)
+            .setConnectTimeoutMs(8000)
+            .setReadTimeoutMs(10000);
+    /** Counts the play() calls, so a late answer for a channel no longer wanted is dropped. */
+    private int playSeq;
+    /** Links without .m3u8 or .mpd whose kind is known: DASH or HLS. */
+    private final Map<String, String> mimes = new HashMap<>();
     private final Runnable hideBar = () -> bar.animate().alpha(0f).setDuration(400).start();
 
     @Override
@@ -118,18 +156,63 @@ public class MainActivity extends Activity {
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
 
         setChannels(ChannelList.load(this));
-        if (ChannelList.refreshDue(this)) {
-            io.execute(() -> {
-                List<ChannelList.Channel> fresh = ChannelList.refresh(this);
-                if (fresh != null) main.post(() -> setChannels(fresh));
+        // The playlist is small: fetch it on every start so edits to it show up right away.
+        reload(ChannelList.playlist(this), false);
+    }
+
+    /** Fetches the playlist at url in the background; it becomes the playlist link if it has channels. */
+    private void reload(String url, boolean tell) {
+        if (tell) menuStatus.setText("Loading the playlist…");
+        io.execute(() -> {
+            List<ChannelList.Channel> fresh = ChannelList.refresh(this, url);
+            main.post(() -> {
+                if (isDestroyed()) return;
+                if (fresh != null) setChannels(fresh);
+                else menuStatus.setText(channels.size() + " channels");
+                if (tell) toast(fresh != null ? fresh.size() + " channels loaded"
+                        : "Couldn't load a playlist from that link");
+                if (fresh != null && current < 0 && !channels.isEmpty() && player != null) play(0);
             });
-        }
+        });
     }
 
     @Override
     protected void onStart() {
         super.onStart();
-        if (channels.isEmpty()) return;
+        player = new ExoPlayer.Builder(this)
+                .setMediaSourceFactory(new DefaultMediaSourceFactory(this).setDataSourceFactory(http))
+                .setLoadControl(new DefaultLoadControl.Builder()
+                        .setBufferDurationsMs(15000, 30000, 1000, 2000).build())
+                .build();
+        player.setVideoSurfaceView(surface);
+        player.addListener(new Player.Listener() {
+            @Override
+            public void onPlaybackStateChanged(int state) {
+                if (state == Player.STATE_READY) message.setVisibility(View.GONE);
+                else if (state == Player.STATE_BUFFERING) {
+                    message.setText("Loading…");
+                    message.setVisibility(View.VISIBLE);
+                }
+            }
+
+            @Override
+            public void onVideoSizeChanged(VideoSize size) {
+                fitSurface(size);
+            }
+
+            @Override
+            public void onPlayerError(PlaybackException e) {
+                String name = current >= 0 && current < channels.size() ? channels.get(current).name : "This channel";
+                Log.w(TAG, name + ": " + e.getErrorCodeName());
+                message.setText(name + " isn't available right now.\nUp / Down for another channel, OK for the list.");
+                message.setVisibility(View.VISIBLE);
+            }
+        });
+        if (channels.isEmpty()) {
+            message.setText("No channels yet.\nOK for the list, then My list to add some.");
+            message.setVisibility(View.VISIBLE);
+            return;
+        }
         int last = indexOf(prefs.getString("last", ""));
         play(last >= 0 ? last : 0);
         if (last < 0) openMenu();   // first time: show what there is
@@ -150,9 +233,14 @@ public class MainActivity extends Activity {
         io.shutdownNow();
     }
 
-    /** New list (bundled, saved or refreshed): rebuild the rows, keep the channel that is playing. */
+    /**
+     * New list (bundled, saved, refreshed or edited): rebuild the rows, keep the channel that is playing,
+     * or play its neighbour if it is gone.
+     */
     private void setChannels(List<ChannelList.Channel> fresh) {
-        String playingId = current >= 0 && current < channels.size() ? channels.get(current).id : null;
+        String playingKey = current >= 0 && current < channels.size() ? channels.get(current).key : null;
+        String playingUrl = playingKey != null ? channels.get(current).url : null;
+        int was = current;
         channels = fresh;
         rows.clear();
         String group = null;
@@ -163,13 +251,27 @@ public class MainActivity extends Activity {
             }
             rows.add(i);
         }
-        if (playingId != null) current = indexOf(playingId);
+        rows.add(MY_LIST);
+        for (Action a : Action.values()) if (a != Action.RESET || ChannelList.hasEdits(this)) rows.add(a);
+        current = playingKey != null ? indexOf(playingKey) : -1;
         menuStatus.setText(channels.size() + " channels");
         adapter.notifyDataSetChanged();
+        if (player == null || playingKey == null) return;
+        if (current < 0) {
+            if (channels.isEmpty()) {
+                player.stop();
+                message.setText("No channels.");
+                message.setVisibility(View.VISIBLE);
+            } else {
+                play(Math.min(was, channels.size() - 1));
+            }
+        } else if (!channels.get(current).url.equals(playingUrl)) {
+            play(current);   // its link changed
+        }
     }
 
-    private int indexOf(String id) {
-        for (int i = 0; i < channels.size(); i++) if (channels.get(i).id.equals(id)) return i;
+    private int indexOf(String key) {
+        for (int i = 0; i < channels.size(); i++) if (channels.get(i).key.equals(key)) return i;
         return -1;
     }
 
@@ -185,7 +287,7 @@ public class MainActivity extends Activity {
 
         TextView title = text(14, 500, 0x99FFFFFF);
         title.setLetterSpacing(0.22f);
-        title.setText("CHANNELS");
+        title.setText("FREE IPTV");
         menu.addView(title);
         menuStatus = text(13, 400, 0x66FFFFFF);
         menuStatus.setPadding(0, dp(4), 0, dp(14));
@@ -206,7 +308,15 @@ public class MainActivity extends Activity {
             if (row instanceof Integer) {
                 play((Integer) row);
                 closeMenu();
+            } else if (row instanceof Action) {
+                run((Action) row);
             }
+        });
+        list.setOnItemLongClickListener((parent, view, position, id) -> {
+            Object row = rows.get(position);
+            if (!(row instanceof Integer)) return false;
+            channelOptions((Integer) row);
+            return true;
         });
         list.setOnKeyListener((v, keyCode, event) -> {
             if (event.getAction() != KeyEvent.ACTION_DOWN) return false;
@@ -214,12 +324,17 @@ public class MainActivity extends Activity {
                 jumpGroup(keyCode == KeyEvent.KEYCODE_DPAD_RIGHT ? 1 : -1);
                 return true;
             }
+            if (keyCode == KeyEvent.KEYCODE_MENU) {
+                int pos = list.getSelectedItemPosition();
+                if (pos >= 0 && rows.get(pos) instanceof Integer) channelOptions((Integer) rows.get(pos));
+                return true;
+            }
             return false;
         });
         menu.addView(list, new LinearLayout.LayoutParams(-1, 0, 1f));
 
         TextView hint = text(12, 400, 0x59FFFFFF);
-        hint.setText("◀ ▶ groups   ·   OK watch   ·   Back close");
+        hint.setText("◀ ▶ groups  ·  OK watch  ·  hold OK edit  ·  Back close");
         hint.setPadding(0, dp(12), 0, 0);
         menu.addView(hint);
 
@@ -231,7 +346,6 @@ public class MainActivity extends Activity {
     }
 
     private void openMenu() {
-        if (channels.isEmpty()) return;
         menu.setVisibility(View.VISIBLE);
         menu.setAlpha(0f);
         menu.setTranslationX(-dp(40));
@@ -241,6 +355,7 @@ public class MainActivity extends Activity {
         adapter.notifyDataSetChanged();
         list.requestFocus();
         int row = rows.indexOf(current >= 0 ? current : 0);
+        if (row < 0) row = rows.indexOf(Action.ADD);
         list.setSelectionFromTop(Math.max(0, row), dp(140));
     }
 
@@ -282,12 +397,13 @@ public class MainActivity extends Activity {
 
         @Override
         public int getViewTypeCount() {
-            return 2;
+            return 3;
         }
 
         @Override
         public int getItemViewType(int position) {
-            return rows.get(position) instanceof String ? 0 : 1;
+            Object row = rows.get(position);
+            return row instanceof String ? 0 : row instanceof Integer ? 1 : 2;
         }
 
         @Override
@@ -297,7 +413,7 @@ public class MainActivity extends Activity {
 
         @Override
         public boolean isEnabled(int position) {
-            return rows.get(position) instanceof Integer;
+            return !(rows.get(position) instanceof String);
         }
 
         @Override
@@ -310,6 +426,21 @@ public class MainActivity extends Activity {
                 h.setLetterSpacing(0.12f);
                 h.setPadding(dp(12), dp(position == 0 ? 4 : 18), 0, dp(8));
                 return h;
+            }
+            if (row instanceof Action) {
+                TextView a;
+                if (convert instanceof TextView) {
+                    a = (TextView) convert;
+                } else {
+                    a = text(16, 500, 0);
+                    a.setTextColor(new ColorStateList(new int[][] {{android.R.attr.state_selected}, {}},
+                            new int[] {0xFF111111, 0xD9FFFFFF}));
+                    a.setGravity(Gravity.CENTER_VERTICAL);
+                    a.setMinHeight(dp(48));
+                    a.setPadding(dp(16), 0, dp(14), 0);
+                }
+                a.setText(((Action) row).label);
+                return a;
             }
             RowHolder holder;
             if (convert != null && convert.getTag() instanceof RowHolder) {
@@ -419,64 +550,38 @@ public class MainActivity extends Activity {
         index = (index % channels.size() + channels.size()) % channels.size();
         current = index;
         final ChannelList.Channel c = channels.get(index);
-        prefs.edit().putString("last", c.id).apply();
+        prefs.edit().putString("last", c.key).apply();
         adapter.notifyDataSetChanged();
         message.setText("Loading…");
         message.setVisibility(View.VISIBLE);
         if (!menuOpen()) showBar(c, index);
 
-        if (player != null) player.release();
+        if (player == null) return;
+        // The data sources made for the new item take the channel's own headers.
         Map<String, String> headers = new HashMap<>();
         if (c.referrer != null) headers.put("Referer", c.referrer);
-        DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory()
-                .setUserAgent(c.userAgent != null ? c.userAgent : DEFAULT_UA)
-                .setAllowCrossProtocolRedirects(true)
-                .setConnectTimeoutMs(10000)
-                .setReadTimeoutMs(15000)
-                .setDefaultRequestProperties(headers);
-        player = new ExoPlayer.Builder(this)
-                .setMediaSourceFactory(new DefaultMediaSourceFactory(this).setDataSourceFactory(http))
-                .build();
-        player.setVideoSurfaceView(surface);
-        player.addListener(new Player.Listener() {
-            @Override
-            public void onPlaybackStateChanged(int state) {
-                if (state == Player.STATE_READY) message.setVisibility(View.GONE);
-                else if (state == Player.STATE_BUFFERING) {
-                    message.setText("Loading…");
-                    message.setVisibility(View.VISIBLE);
-                }
-            }
-
-            @Override
-            public void onVideoSizeChanged(VideoSize size) {
-                fitSurface(size);
-            }
-
-            @Override
-            public void onPlayerError(PlaybackException e) {
-                Log.w(TAG, c.name + ": " + e.getErrorCodeName());
-                message.setText(c.name + " isn't available right now.\nUp / Down for another channel, OK for the list.");
-                message.setVisibility(View.VISIBLE);
-            }
-        });
+        http.setUserAgent(c.userAgent != null ? c.userAgent : DEFAULT_UA).setDefaultRequestProperties(headers);
         final ExoPlayer p = player;
-        // Links without .m3u8 or .mpd: look at the first bytes to tell DASH from HLS.
+        final int seq = ++playSeq;
+        // Links without .m3u8 or .mpd: look at the first bytes to tell DASH from HLS, once per link.
         String lower = c.url.toLowerCase(Locale.ROOT);
-        if (lower.contains(".m3u8") || lower.contains(".mpd")) {
-            start(p, c.url, null);
+        String known = mimes.get(c.url);
+        if (lower.contains(".m3u8") || lower.contains(".mpd") || known != null) {
+            start(p, c.url, known);
         } else {
+            p.stop();
             io.execute(() -> {
                 String mime = MimeTypes.APPLICATION_M3U8;
                 try {
                     // DASH manifests are XML; HLS playlists start with #EXTM3U.
-                    String head = new String(ChannelList.fetch(c.url), StandardCharsets.UTF_8).trim();
+                    String head = new String(ChannelList.fetch(c.url, 512), StandardCharsets.UTF_8).trim();
                     if (head.startsWith("<")) mime = MimeTypes.APPLICATION_MPD;
                 } catch (Exception ignored) {
                 }
                 final String m = mime;
                 main.post(() -> {
-                    if (player == p) start(p, c.url, m);
+                    mimes.put(c.url, m);
+                    if (player == p && playSeq == seq) start(p, c.url, m);
                 });
             });
         }
@@ -534,10 +639,12 @@ public class MainActivity extends Activity {
                 return true;
             case KeyEvent.KEYCODE_DPAD_UP:
             case KeyEvent.KEYCODE_CHANNEL_DOWN:
+                if (current < 0) return true;
                 play(current - 1);
                 return true;
             case KeyEvent.KEYCODE_DPAD_DOWN:
             case KeyEvent.KEYCODE_CHANNEL_UP:
+                if (current < 0) return true;
                 play(current + 1);
                 return true;
             case KeyEvent.KEYCODE_DPAD_LEFT:
@@ -548,6 +655,121 @@ public class MainActivity extends Activity {
             default:
                 return super.onKeyDown(keyCode, event);
         }
+    }
+
+    // ---- my list: editing the channels ---------------------------------------------------------
+
+    private void run(Action a) {
+        switch (a) {
+            case ADD:
+                editChannel(null);
+                break;
+            case PLAYLIST: {
+                EditText link = field("https://…/playlist.m3u", ChannelList.playlist(this), InputType.TYPE_TEXT_VARIATION_URI);
+                new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                        .setTitle("Playlist link")
+                        .setMessage("An M3U playlist. The channels come from it each time the app starts; "
+                                + "your own changes stay. Leave it empty for the default playlist.")
+                        .setView(form(link))
+                        .setPositiveButton("Load", (d, w) -> {
+                            String url = link.getText().toString().trim();
+                            reload(url.isEmpty() ? getString(R.string.playlist) : url, true);
+                        })
+                        .setNegativeButton("Cancel", null)
+                        .show();
+                break;
+            }
+            case RELOAD:
+                reload(ChannelList.playlist(this), true);
+                break;
+            case RESET:
+                new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                        .setTitle("Undo my changes?")
+                        .setMessage("The channels you added, changed or removed go back to the playlist as it is.")
+                        .setPositiveButton("Undo", (d, w) -> {
+                            ChannelList.resetEdits(this);
+                            setChannels(ChannelList.load(this));
+                        })
+                        .setNegativeButton("Cancel", null)
+                        .show();
+                break;
+        }
+    }
+
+    private void channelOptions(int index) {
+        ChannelList.Channel c = channels.get(index);
+        new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                .setTitle(c.name)
+                .setItems(new String[] {"Edit", "Remove"}, (d, which) -> {
+                    if (which == 0) {
+                        editChannel(c);
+                    } else {
+                        ChannelList.remove(this, c);
+                        setChannels(ChannelList.load(this));
+                        toast(c.name + " removed");
+                    }
+                })
+                .show();
+    }
+
+    /** Edits c, or adds a channel when c is null. */
+    private void editChannel(ChannelList.Channel c) {
+        EditText name = field("Name", c == null ? "" : c.name, InputType.TYPE_TEXT_FLAG_CAP_WORDS);
+        EditText url = field("Stream link (.m3u8, .mpd)", c == null ? "" : c.url, InputType.TYPE_TEXT_VARIATION_URI);
+        EditText group = field("Group", c == null ? "My channels" : c.group, InputType.TYPE_TEXT_FLAG_CAP_WORDS);
+        EditText logo = field("Logo link (optional)", c == null ? "" : c.logo, InputType.TYPE_TEXT_VARIATION_URI);
+        AlertDialog d = new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                .setTitle(c == null ? "Add a channel" : "Edit " + c.name)
+                .setView(form(name, url, group, logo))
+                .setPositiveButton("Save", null)
+                .setNegativeButton("Cancel", null)
+                .show();
+        // Set here rather than in the builder so a missing name or link keeps the dialog open.
+        d.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
+            String n = name.getText().toString().trim(), u = url.getText().toString().trim();
+            if (n.isEmpty()) {
+                name.setError("A name");
+                return;
+            }
+            if (!u.startsWith("http://") && !u.startsWith("https://")) {
+                url.setError("A link starting with http:// or https://");
+                return;
+            }
+            String g = group.getText().toString().trim();
+            ChannelList.Channel e = c != null ? c : new ChannelList.Channel("", n, g, "", u, null, null);
+            e.name = n;
+            e.url = u;
+            e.group = g.isEmpty() ? "My channels" : g;
+            e.logo = logo.getText().toString().trim();
+            ChannelList.save(this, e);
+            d.dismiss();
+            setChannels(ChannelList.load(this));
+            if (c == null) {
+                play(indexOf(e.key));
+                closeMenu();
+            }
+        });
+    }
+
+    private EditText field(String hint, String value, int variation) {
+        EditText f = new EditText(this);
+        f.setHint(hint);
+        f.setText(value);
+        f.setSingleLine(true);
+        f.setInputType(InputType.TYPE_CLASS_TEXT | variation);
+        return f;
+    }
+
+    private View form(View... fields) {
+        LinearLayout l = new LinearLayout(this);
+        l.setOrientation(LinearLayout.VERTICAL);
+        l.setPadding(dp(24), dp(8), dp(24), 0);
+        for (View f : fields) l.addView(f, new LinearLayout.LayoutParams(-1, -2));
+        return l;
+    }
+
+    private void toast(String text) {
+        Toast.makeText(this, text, Toast.LENGTH_SHORT).show();
     }
 
     // ---- logos ----------------------------------------------------------------------------------
