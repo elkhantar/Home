@@ -1,6 +1,7 @@
 package com.majnioui.tv.channels;
 
 import android.content.Context;
+import android.net.Uri;
 import android.util.Log;
 
 import org.json.JSONArray;
@@ -24,8 +25,9 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * The channels. They come from the owner's M3U playlists, added and removed in the app (there are none
- * at first: the app is only a player); the channels of all the playlists are put together. Each
+ * The channels. They come from the owner's M3U playlists and Xtream Codes accounts, added and removed
+ * in the app (there are none at first: the app is only a player); the channels of all of them are put
+ * together. Each
  * playlist is fetched again every time the app starts, so editing a playlist changes the channels. The
  * last copy of each that could be fetched is saved for when it can't be reached.
  *
@@ -60,12 +62,22 @@ final class ChannelList {
         }
     }
 
+    /** An M3U playlist (url), or an Xtream Codes account (url is the server, with user and pass). */
     static final class Playlist {
-        String name, url;
+        String name, url, user, pass;
 
         Playlist(String name, String url) {
             this.name = name;
             this.url = url;
+        }
+
+        boolean xtream() {
+            return user != null && !user.isEmpty();
+        }
+
+        /** What tells it from the others: its link, or the account on its server. */
+        String id() {
+            return xtream() ? "xtream:" + user + "@" + url : url;
         }
     }
 
@@ -82,7 +94,10 @@ final class ChannelList {
             JSONArray a = new JSONArray(json);
             for (int i = 0; i < a.length(); i++) {
                 JSONObject o = a.getJSONObject(i);
-                out.add(new Playlist(o.optString("name"), o.optString("url")));
+                Playlist p = new Playlist(o.optString("name"), o.optString("url"));
+                p.user = o.optString("user", null);
+                p.pass = o.optString("pass", null);
+                out.add(p);
             }
         } catch (Exception e) {
             Log.w(TAG, "playlists: " + e);
@@ -93,7 +108,11 @@ final class ChannelList {
     private static void savePlaylists(Context ctx, List<Playlist> list) {
         JSONArray a = new JSONArray();
         try {
-            for (Playlist p : list) a.put(new JSONObject().put("name", p.name).put("url", p.url));
+            for (Playlist p : list) {
+                JSONObject o = new JSONObject().put("name", p.name).put("url", p.url);
+                if (p.xtream()) o.put("user", p.user).put("pass", p.pass);
+                a.put(o);
+            }
         } catch (Exception e) {
             Log.w(TAG, "save playlists: " + e);
         }
@@ -101,33 +120,33 @@ final class ChannelList {
     }
 
     /**
-     * Fetches the playlist at url and adds it, or replaces the playlist at old (a changed name or link);
-     * returns the number of its channels, or -1 when it can't be fetched or has none (nothing changes
-     * then). Blocking: run off the main thread.
+     * Fetches the playlist p and adds it, or puts it in place of the playlist whose id is old (a changed
+     * name, link or account); returns the number of its channels, or -1 when it can't be fetched or has
+     * none (nothing changes then). Blocking: run off the main thread.
      */
-    static int addPlaylist(Context ctx, String name, String url, String old) {
-        int n = fetchPlaylist(ctx, url);
+    static int addPlaylist(Context ctx, Playlist p, String old) {
+        int n = fetchPlaylist(ctx, p);
         if (n <= 0) return -1;
         List<Playlist> list = playlists(ctx);
         int at = list.size();
         for (int i = 0; i < list.size(); i++) {
-            if (list.get(i).url.equals(old)) at = i;
+            if (list.get(i).id().equals(old)) at = i;
         }
         for (int i = list.size() - 1; i >= 0; i--) {
-            if (list.get(i).url.equals(url) || list.get(i).url.equals(old)) list.remove(i);
+            if (list.get(i).id().equals(p.id()) || list.get(i).id().equals(old)) list.remove(i);
         }
-        list.add(Math.min(at, list.size()), new Playlist(name, url));
+        list.add(Math.min(at, list.size()), p);
         savePlaylists(ctx, list);
-        if (old != null && !old.equals(url)) saved(ctx, old).delete();
+        if (old != null && !old.equals(p.id())) saved(ctx, old).delete();
         return n;
     }
 
-    /** Takes a playlist and its channels out of the list. */
-    static void removePlaylist(Context ctx, String url) {
+    /** Takes the playlist with this id and its channels out of the list. */
+    static void removePlaylist(Context ctx, String id) {
         List<Playlist> list = playlists(ctx);
-        for (int i = list.size() - 1; i >= 0; i--) if (list.get(i).url.equals(url)) list.remove(i);
+        for (int i = list.size() - 1; i >= 0; i--) if (list.get(i).id().equals(id)) list.remove(i);
         savePlaylists(ctx, list);
-        saved(ctx, url).delete();
+        saved(ctx, id).delete();
     }
 
     /**
@@ -136,27 +155,88 @@ final class ChannelList {
      */
     static List<Channel> refresh(Context ctx) {
         boolean any = false;
-        for (Playlist p : playlists(ctx)) any |= fetchPlaylist(ctx, p.url) > 0;
+        for (Playlist p : playlists(ctx)) any |= fetchPlaylist(ctx, p) > 0;
         return any ? load(ctx) : null;
     }
 
-    /** Fetches one playlist and saves it if it has channels; returns how many, or -1. */
-    static int fetchPlaylist(Context ctx, String url) {
+    /**
+     * Fetches one playlist and saves it as M3U if it has channels; returns how many, or -1. An Xtream
+     * Codes account is turned into M3U here, so the rest of the app only knows M3U.
+     */
+    static int fetchPlaylist(Context ctx, Playlist p) {
         try {
-            byte[] data = fetch(url);
+            byte[] data = p.xtream() ? xtream(p).getBytes(StandardCharsets.UTF_8) : fetch(p.url);
             int n = parse(new String(data, StandardCharsets.UTF_8)).size();
             if (n == 0) {
-                Log.w(TAG, "playlist " + url + ": no channels");
+                Log.w(TAG, "playlist " + p.name + ": no channels");
                 return -1;
             }
-            try (FileOutputStream out = new FileOutputStream(saved(ctx, url))) {
+            try (FileOutputStream out = new FileOutputStream(saved(ctx, p.id()))) {
                 out.write(data);
             }
             return n;
         } catch (Exception e) {
-            Log.w(TAG, "playlist " + url + ": " + e);
+            Log.w(TAG, "playlist " + p.name + ": " + e);
             return -1;
         }
+    }
+
+    /** "http://host:port", whatever the owner typed around it. */
+    static String server(String typed) {
+        String s = typed.trim();
+        if (!s.startsWith("http://") && !s.startsWith("https://")) s = "http://" + s;
+        int api = s.indexOf("/player_api.php");
+        if (api < 0) api = s.indexOf("/get.php");
+        if (api >= 0) s = s.substring(0, api);
+        while (s.endsWith("/")) s = s.substring(0, s.length() - 1);
+        return s;
+    }
+
+    /** The live channels of an Xtream Codes account, as M3U, in the order of its categories. */
+    private static String xtream(Playlist p) throws Exception {
+        String api = p.url + "/player_api.php?username=" + Uri.encode(p.user) + "&password=" + Uri.encode(p.pass);
+        JSONObject info = new JSONObject(new String(fetch(api), StandardCharsets.UTF_8));
+        JSONObject user = info.optJSONObject("user_info");
+        if (user == null || user.optInt("auth", 0) != 1) throw new Exception("login refused");
+        // HLS when the account has it: it starts faster and copes with a slow network.
+        JSONArray formats = user.optJSONArray("allowed_output_formats");
+        String ext = "ts";
+        for (int i = 0; formats != null && i < formats.length(); i++) if ("m3u8".equals(formats.optString(i))) ext = "m3u8";
+
+        Map<String, String> categories = new LinkedHashMap<>();
+        JSONArray cats = new JSONArray(new String(fetch(api + "&action=get_live_categories"), StandardCharsets.UTF_8));
+        for (int i = 0; i < cats.length(); i++) {
+            JSONObject c = cats.getJSONObject(i);
+            categories.put(c.optString("category_id"), c.optString("category_name"));
+        }
+        List<String> order = new ArrayList<>(categories.keySet());
+        JSONArray streams = new JSONArray(new String(fetch(api + "&action=get_live_streams"), StandardCharsets.UTF_8));
+        List<JSONObject> list = new ArrayList<>(streams.length());
+        for (int i = 0; i < streams.length(); i++) list.add(streams.getJSONObject(i));
+        list.sort((a, b) -> Integer.compare(rank(order, a.optString("category_id")), rank(order, b.optString("category_id"))));
+
+        StringBuilder m3u = new StringBuilder("#EXTM3U\n");
+        for (JSONObject st : list) {
+            String id = st.optString("stream_id");
+            if (id.isEmpty()) continue;
+            String group = categories.get(st.optString("category_id"));
+            m3u.append("#EXTINF:-1 tvg-id=\"xc-").append(id)
+                    .append("\" tvg-logo=\"").append(clean(st.optString("stream_icon")))
+                    .append("\" group-title=\"").append(clean(group == null ? "Other" : group))
+                    .append("\",").append(st.optString("name").replace('\n', ' ')).append('\n')
+                    .append(p.url).append("/live/").append(Uri.encode(p.user)).append('/')
+                    .append(Uri.encode(p.pass)).append('/').append(id).append('.').append(ext).append('\n');
+        }
+        return m3u.toString();
+    }
+
+    private static int rank(List<String> order, String category) {
+        int i = order.indexOf(category);
+        return i < 0 ? Integer.MAX_VALUE : i;
+    }
+
+    private static String clean(String attr) {
+        return attr == null ? "" : attr.replace("\"", "'").replace('\n', ' ');
     }
 
     /** The saved copies of the playlists, with the edits. Fast; main thread is fine. */
@@ -165,11 +245,11 @@ final class ChannelList {
         Set<String> keys = new HashSet<>();
         for (Playlist p : playlists(ctx)) {
             List<Channel> list = null;
-            File f = saved(ctx, p.url);
+            File f = saved(ctx, p.id());
             try {
                 if (f.isFile()) list = parse(new String(readAll(new FileInputStream(f)), StandardCharsets.UTF_8));
             } catch (Exception e) {
-                Log.w(TAG, "saved " + p.url + ": " + e);
+                Log.w(TAG, "saved " + p.name + ": " + e);
             }
             if (list == null) continue;
             for (Channel c : list) {
@@ -177,15 +257,15 @@ final class ChannelList {
                 String key = c.key;
                 for (int n = 2; !keys.add(key); n++) key = c.key + "#" + n;
                 c.key = key;
-                c.source = p.url;
+                c.source = p.id();
                 base.add(c);
             }
         }
         return applyEdits(ctx, base);
     }
 
-    private static File saved(Context ctx, String url) {
-        return new File(ctx.getFilesDir(), "playlist-" + Integer.toHexString(url.hashCode()) + ".m3u");
+    private static File saved(Context ctx, String id) {
+        return new File(ctx.getFilesDir(), "playlist-" + Integer.toHexString(id.hashCode()) + ".m3u");
     }
 
     private static android.content.SharedPreferences prefs(Context ctx) {

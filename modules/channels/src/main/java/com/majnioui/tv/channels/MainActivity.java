@@ -13,7 +13,9 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.text.Editable;
 import android.text.TextUtils;
+import android.text.TextWatcher;
 import android.util.Log;
 import android.util.LruCache;
 import android.util.TypedValue;
@@ -23,6 +25,8 @@ import android.view.SurfaceView;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
+import android.view.inputmethod.EditorInfo;
+import android.view.inputmethod.InputMethodManager;
 import android.text.InputType;
 import android.widget.BaseAdapter;
 import android.widget.EditText;
@@ -58,15 +62,16 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
- * M3U Lite: live channels from the owner's M3U playlists (see ChannelList), like a TV's own channel
- * app: it opens on the last channel, full screen. OK opens the channel list on the left: Up/Down to
- * move (past the last channel back to the first and the other way round), Left/Right to jump between
- * groups, OK to watch, hold OK to make a channel a favourite (favourites come first), Menu to edit or
- * remove it, Back to close. Without the list, Up/Down and CH+/CH- switch channels and Back leaves.
+ * M3U Lite: live channels from the owner's M3U playlists and Xtream Codes accounts (see ChannelList),
+ * like a TV's own channel app: it opens on the last channel, full screen. OK opens the channel list on
+ * the left: Up/Down to move (past the last channel back to the first and the other way round; Up on the
+ * first channel goes to the search box first), Left/Right to jump between groups, OK to watch, hold OK
+ * to make a channel a favourite (favourites come first), Menu to edit or remove it, Back to close.
+ * Without the list, Up/Down and CH+/CH- switch channels and Back leaves.
  *
- * Left twice, in the list or while watching, opens the other panel: the playlists (add, change, reload,
- * remove) and the owner's own channels. The lists are ListViews, so only the rows on screen exist,
- * however many channels there are.
+ * Left twice, in the list or while watching, opens Settings in its place: the language (English or
+ * Arabic), the playlists (add, change, reload, remove) and the owner's own channels. The lists are
+ * ListViews, so only the rows on screen exist, however many channels there are.
  *
  * One player plays every channel: switching only changes what it plays, and playback starts after a
  * second of video rather than ExoPlayer's default of two and a half.
@@ -76,41 +81,27 @@ public class MainActivity extends Activity {
     private static final long BAR_MS = 4000;
     private static final String DEFAULT_UA =
             "Mozilla/5.0 (Linux; Android 11) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36";
-    /** Group titles in the bundled list, with their Arabic names. */
-    private static final Map<String, String> ARABIC = new HashMap<>();
 
-    static {
-        ARABIC.put("Morocco", "المغرب");
-        ARABIC.put("News", "الأخبار");
-        ARABIC.put("Entertainment", "الترفيه");
-        ARABIC.put("Documentary", "الوثائقيات");
-        ARABIC.put("Religious", "القنوات الدينية");
-        ARABIC.put("General", "عامة");
-        ARABIC.put("Sports", "الرياضة");
-        ARABIC.put("Music", "الموسيقى");
-        ARABIC.put("Family", "العائلة");
-        ARABIC.put("Business", "الاقتصاد");
-        ARABIC.put("Favorites", "المفضلة");
-        ARABIC.put("Playlists", "قوائم التشغيل");
-        ARABIC.put("My list", "قائمتي");
-    }
-
-    /** The rows of the playlists panel, with its "Playlists" and "My list" groups. */
+    /** The rows of Settings. */
     private enum Action {
-        ADD_PLAYLIST("＋  Add a playlist"),
-        RELOAD("Reload the playlists"),
-        ADD("＋  Add a channel"),
-        RESET("Undo my changes");
+        LANGUAGE("Language: English", "اللغة: العربية"),
+        ADD_PLAYLIST("＋  Add a playlist", "＋  إضافة قائمة تشغيل"),
+        RELOAD("Reload the playlists", "إعادة تحميل القوائم"),
+        ADD("＋  Add a channel", "＋  إضافة قناة"),
+        RESET("Undo my changes", "التراجع عن تغييراتي");
 
-        final String label;
+        final String en, ar;
 
-        Action(String label) {
-            this.label = label;
+        Action(String en, String ar) {
+            this.en = en;
+            this.ar = ar;
         }
     }
 
-    private static final String FAVORITES = "Favorites", PLAYLISTS = "Playlists", MY_LIST = "My list";
-    /** Two Left presses this close together open the playlists panel. */
+    /** Headers of the app's own groups; any other header is a group name from a playlist. */
+    private static final String FAVORITES = "Favorites", LANGUAGE = "Language", PLAYLISTS = "Playlists",
+            MY_LIST = "My list";
+    /** Two Left presses this close together open Settings. */
     private static final long DOUBLE_MS = 450;
 
     private final Handler main = new Handler(Looper.getMainLooper());
@@ -119,6 +110,10 @@ public class MainActivity extends Activity {
     private Typeface font;
     private int accent;
     private SharedPreferences prefs;
+    /** The app's own words in Arabic rather than English (Settings, Language). */
+    private boolean arabic;
+    /** What is typed in the search box. */
+    private String query = "";
 
     /** The channels as ChannelList gives them; channels is the same with the favourites first. */
     private List<ChannelList.Channel> loaded = new ArrayList<>();
@@ -128,7 +123,7 @@ public class MainActivity extends Activity {
     private int favoriteCount;
     /** Rows of the channel list: a String is a group header, an Integer the index of a channel. */
     private final List<Object> rows = new ArrayList<>();
-    /** Rows of the playlists panel: a String is a group header, then Playlists and Actions. */
+    /** Rows of Settings: a String is a group header, then Playlists and Actions. */
     private final List<Object> manageRows = new ArrayList<>();
     private int current = -1;
     /** When Left was last pressed, and the list row it was pressed on, for the double press. */
@@ -144,6 +139,7 @@ public class MainActivity extends Activity {
     private LinearLayout menu, manage;
     private ListView list, manageList;
     private TextView menuStatus;
+    private EditText search;
     private final RowAdapter adapter = new RowAdapter(rows);
     private final RowAdapter manageAdapter = new RowAdapter(manageRows);
     private ExoPlayer player;
@@ -153,7 +149,7 @@ public class MainActivity extends Activity {
             .setReadTimeoutMs(10000);
     /** Counts the play() calls, so a late answer for a channel no longer wanted is dropped. */
     private int playSeq;
-    /** Links without .m3u8 or .mpd whose kind is known: DASH or HLS. */
+    /** Links without .m3u8, .mpd or .ts whose kind is known: DASH, HLS or "" for a plain stream. */
     private final Map<String, String> mimes = new HashMap<>();
     private final Runnable hideBar = () -> bar.animate().alpha(0f).setDuration(400).start();
 
@@ -163,6 +159,7 @@ public class MainActivity extends Activity {
         font = getResources().getFont(R.font.outfit);
         accent = getColor(R.color.accent);
         prefs = getSharedPreferences("channels", MODE_PRIVATE);
+        arabic = "ar".equals(prefs.getString("language", "en"));
         try {
             JSONArray a = new JSONArray(prefs.getString("favorites", "[]"));
             for (int i = 0; i < a.length(); i++) favorites.add(a.getString(i));
@@ -190,14 +187,14 @@ public class MainActivity extends Activity {
 
     /** Fetches every playlist again in the background. */
     private void reload(boolean tell) {
-        if (tell) menuStatus.setText("Loading the playlists…");
+        if (tell) menuStatus.setText(t("Loading the playlists…", "جارٍ تحميل القوائم…"));
         io.execute(() -> {
             List<ChannelList.Channel> fresh = ChannelList.refresh(this);
             main.post(() -> {
                 if (isDestroyed()) return;
                 if (fresh != null) setChannels(fresh);
-                else menuStatus.setText(channels.size() + " channels");
-                if (tell) toast(fresh != null ? fresh.size() + " channels" : "Couldn't load the playlists");
+                else buildRows();
+                if (tell) toast(fresh != null ? count(fresh.size()) : t("Couldn't load the playlists", "تعذر تحميل القوائم"));
                 playIfIdle();
             });
         });
@@ -222,7 +219,7 @@ public class MainActivity extends Activity {
             public void onPlaybackStateChanged(int state) {
                 if (state == Player.STATE_READY) message.setVisibility(View.GONE);
                 else if (state == Player.STATE_BUFFERING) {
-                    message.setText("Loading…");
+                    message.setText(t("Loading…", "جارٍ التحميل…"));
                     message.setVisibility(View.VISIBLE);
                 }
             }
@@ -234,14 +231,15 @@ public class MainActivity extends Activity {
 
             @Override
             public void onPlayerError(PlaybackException e) {
-                String name = current >= 0 && current < channels.size() ? channels.get(current).name : "This channel";
+                String name = current >= 0 && current < channels.size() ? channels.get(current).name : t("This channel", "هذه القناة");
                 Log.w(TAG, name + ": " + e.getErrorCodeName());
-                message.setText(name + " isn't available right now.\nUp / Down for another channel, OK for the list.");
+                message.setText(name + t(" isn't available right now.\nUp / Down for another channel, OK for the list.",
+                        " غير متاحة الآن.\nأعلى / أسفل لقناة أخرى، OK للقائمة."));
                 message.setVisibility(View.VISIBLE);
             }
         });
         if (channels.isEmpty()) {
-            message.setText("No channels yet.\nAdd an M3U playlist on the left.");
+            message.setText(t("No channels yet.\nAdd a playlist in Settings.", "لا توجد قنوات بعد.\nأضف قائمة تشغيل من الإعدادات."));
             message.setVisibility(View.VISIBLE);
             openManage();
             return;
@@ -282,17 +280,10 @@ public class MainActivity extends Activity {
         for (String k : favorites) if (byKey.containsKey(k)) channels.add(byKey.remove(k));
         favoriteCount = channels.size();
         for (ChannelList.Channel c : fresh) if (byKey.containsKey(c.key)) channels.add(c);
-        rows.clear();
-        String group = null;
-        for (int i = 0; i < channels.size(); i++) {
-            String g = i < favoriteCount ? FAVORITES : channels.get(i).group;
-            if (!g.equals(group)) {
-                group = g;
-                rows.add(group);
-            }
-            rows.add(i);
-        }
+        buildRows();
         manageRows.clear();
+        manageRows.add(LANGUAGE);
+        manageRows.add(Action.LANGUAGE);
         manageRows.add(PLAYLISTS);
         manageRows.addAll(ChannelList.playlists(this));
         manageRows.add(Action.ADD_PLAYLIST);
@@ -301,14 +292,13 @@ public class MainActivity extends Activity {
         manageRows.add(Action.ADD);
         if (ChannelList.hasEdits(this)) manageRows.add(Action.RESET);
         current = playingKey != null ? indexOf(playingKey) : -1;
-        menuStatus.setText(channels.size() + " channels");
         adapter.notifyDataSetChanged();
         manageAdapter.notifyDataSetChanged();
         if (player == null || playingKey == null) return;
         if (current < 0) {
             if (channels.isEmpty()) {
                 player.stop();
-                message.setText("No channels.");
+                message.setText(t("No channels.", "لا توجد قنوات."));
                 message.setVisibility(View.VISIBLE);
             } else {
                 play(Math.min(was, channels.size() - 1));
@@ -316,6 +306,26 @@ public class MainActivity extends Activity {
         } else if (!channels.get(current).url.equals(playingUrl)) {
             play(current);   // its link changed
         }
+    }
+
+    /** The channel list's rows: the channels whose name has the search text, under their groups. */
+    private void buildRows() {
+        rows.clear();
+        String q = query.trim().toLowerCase(Locale.ROOT);
+        String group = null;
+        int found = 0;
+        for (int i = 0; i < channels.size(); i++) {
+            if (!q.isEmpty() && !channels.get(i).name.toLowerCase(Locale.ROOT).contains(q)) continue;
+            found++;
+            String g = i < favoriteCount ? FAVORITES : channels.get(i).group;
+            if (!g.equals(group)) {
+                group = g;
+                rows.add(group);
+            }
+            rows.add(i);
+        }
+        menuStatus.setText(q.isEmpty() ? count(channels.size()) : t(found + " found", "النتائج: " + found));
+        adapter.notifyDataSetChanged();
     }
 
     private int indexOf(String key) {
@@ -333,8 +343,12 @@ public class MainActivity extends Activity {
         title.setText("M3U LITE");
         menu.addView(title);
         menuStatus = text(13, 400, 0x66FFFFFF);
-        menuStatus.setPadding(0, dp(4), 0, dp(14));
+        menuStatus.setPadding(0, dp(4), 0, dp(12));
         menu.addView(menuStatus);
+        buildSearch();
+        LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(-1, dp(46));
+        slp.bottomMargin = dp(10);
+        menu.addView(search, slp);
 
         list = listView(adapter);
         list.setOnItemClickListener((parent, view, position, id) -> {
@@ -371,23 +385,103 @@ public class MainActivity extends Activity {
                 if (pos >= 0 && rows.get(pos) instanceof Integer) channelOptions((Integer) rows.get(pos));
                 return true;
             }
+            if (keyCode == KeyEvent.KEYCODE_DPAD_UP && atEnd(list, rows, true)) {
+                search.requestFocus();
+                return true;
+            }
             return wrap(list, rows, keyCode);
         });
         menu.addView(list, new LinearLayout.LayoutParams(-1, 0, 1f));
-        menu.addView(hint("◀ ▶ groups  ·  OK watch  ·  hold OK favourite\nMenu edit  ·  ◀◀ playlists  ·  Back close"));
+        menu.addView(hint(t("◀ ▶ groups  ·  OK watch  ·  hold OK favourite\nMenu edit  ·  ◀◀ settings  ·  Back close",
+                "◀ ▶ المجموعات  ·  OK مشاهدة  ·  OK مطولاً للمفضلة\nMenu تعديل  ·  ◀◀ الإعدادات  ·  رجوع إغلاق")));
 
         root.addView(menu, new FrameLayout.LayoutParams(dp(400), -1, Gravity.START));
     }
 
-    /** The playlists panel: in place of the channel list, opened with Left twice. */
+    /**
+     * The search box above the channel list: the list keeps only the channels whose name has what is
+     * typed. Down goes to the first of them, Up round to the last.
+     */
+    private void buildSearch() {
+        search = new EditText(this);
+        search.setHint(t("Search channels", "ابحث عن قناة"));
+        search.setSingleLine(true);
+        search.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+        search.setTypeface(font);
+        search.setTextColor(0xFFFFFFFF);
+        search.setHintTextColor(0x80FFFFFF);
+        search.setPadding(dp(16), 0, dp(16), 0);
+        search.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+        search.setImeOptions(EditorInfo.IME_ACTION_SEARCH | EditorInfo.IME_FLAG_NO_EXTRACT_UI);
+        GradientDrawable normal = new GradientDrawable();
+        normal.setCornerRadius(dp(12));
+        normal.setColor(0x1FFFFFFF);
+        GradientDrawable focused = new GradientDrawable();
+        focused.setCornerRadius(dp(12));
+        focused.setColor(0x33FFFFFF);
+        focused.setStroke(dp(2), 0xF5FFFFFF);
+        android.graphics.drawable.StateListDrawable bg = new android.graphics.drawable.StateListDrawable();
+        bg.addState(new int[] {android.R.attr.state_focused}, focused);
+        bg.addState(new int[] {}, normal);
+        search.setBackground(bg);
+        search.addTextChangedListener(new TextWatcher() {
+            @Override
+            public void beforeTextChanged(CharSequence t, int a, int b, int c) {
+            }
+
+            @Override
+            public void onTextChanged(CharSequence t, int a, int b, int c) {
+            }
+
+            @Override
+            public void afterTextChanged(Editable e) {
+                if (e.toString().equals(query)) return;
+                query = e.toString();
+                buildRows();
+                list.setSelection(0);
+            }
+        });
+        search.setOnEditorActionListener((v, action, event) -> {
+            hideKeyboard();
+            selectEnd(false);
+            return true;
+        });
+        search.setOnKeyListener((v, keyCode, event) -> {
+            if (event.getAction() != KeyEvent.ACTION_DOWN) return false;
+            if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN || keyCode == KeyEvent.KEYCODE_DPAD_UP) {
+                hideKeyboard();
+                selectEnd(keyCode == KeyEvent.KEYCODE_DPAD_UP);
+                return true;
+            }
+            return false;
+        });
+    }
+
+    /** Focuses the channel list on its first row, or its last. */
+    private void selectEnd(boolean last) {
+        for (int i = last ? rows.size() - 1 : 0; i >= 0 && i < rows.size(); i += last ? -1 : 1) {
+            if (rows.get(i) instanceof Integer) {
+                list.requestFocus();
+                list.setSelectionFromTop(i, last ? list.getHeight() - dp(140) : dp(40));
+                return;
+            }
+        }
+    }
+
+    private void hideKeyboard() {
+        InputMethodManager imm = getSystemService(InputMethodManager.class);
+        if (imm != null) imm.hideSoftInputFromWindow(search.getWindowToken(), 0);
+    }
+
+    /** Settings: in place of the channel list, opened with Left twice. */
     private void buildManage() {
         manage = panel();
         TextView title = text(14, 500, 0x99FFFFFF);
         title.setLetterSpacing(0.22f);
-        title.setText("M3U LITE");
+        title.setText(t("SETTINGS", "الإعدادات"));
         manage.addView(title);
         TextView sub = text(13, 400, 0x66FFFFFF);
-        sub.setText("Playlists and your own channels");
+        sub.setText(t("Language, playlists and your own channels", "اللغة وقوائم التشغيل وقنواتك"));
         sub.setPadding(0, dp(4), 0, dp(14));
         manage.addView(sub);
 
@@ -408,7 +502,7 @@ public class MainActivity extends Activity {
             return wrap(manageList, manageRows, keyCode);
         });
         manage.addView(manageList, new LinearLayout.LayoutParams(-1, 0, 1f));
-        manage.addView(hint("OK choose  ·  ▶ channels  ·  Back close"));
+        manage.addView(hint(t("OK choose  ·  ▶ channels  ·  Back close", "OK اختيار  ·  ▶ القنوات  ·  رجوع إغلاق")));
 
         root.addView(manage, new FrameLayout.LayoutParams(dp(400), -1, Gravity.START));
     }
@@ -445,14 +539,20 @@ public class MainActivity extends Activity {
         return hint;
     }
 
+    /** True when the selected row of l is the first (up) or the last row that can be selected. */
+    private static boolean atEnd(ListView l, List<Object> r, boolean up) {
+        int pos = l.getSelectedItemPosition();
+        for (int i = up ? pos - 1 : pos + 1; i >= 0 && i < r.size(); i += up ? -1 : 1) {
+            if (!(r.get(i) instanceof String)) return false;
+        }
+        return true;
+    }
+
     /** Up on the first row selects the last one, Down on the last the first. */
     private boolean wrap(ListView l, List<Object> r, int keyCode) {
         if (keyCode != KeyEvent.KEYCODE_DPAD_UP && keyCode != KeyEvent.KEYCODE_DPAD_DOWN) return false;
         boolean up = keyCode == KeyEvent.KEYCODE_DPAD_UP;
-        int pos = l.getSelectedItemPosition();
-        for (int i = up ? pos - 1 : pos + 1; i >= 0 && i < r.size(); i += up ? -1 : 1) {
-            if (!(r.get(i) instanceof String)) return false;   // a row to move to: the list does it
-        }
+        if (!atEnd(l, r, up)) return false;   // a row to move to: the list does it
         for (int i = up ? r.size() - 1 : 0; i >= 0 && i < r.size(); i += up ? -1 : 1) {
             if (!(r.get(i) instanceof String)) {
                 // Going down to the top: show the group header above the first row too.
@@ -482,7 +582,8 @@ public class MainActivity extends Activity {
         prefs.edit().putString("favorites", new JSONArray(favorites).toString()).apply();
         setChannels(loaded);
         list.setSelectionFromTop(Math.max(0, rows.indexOf(indexOf(c.key))), dp(140));
-        toast(add ? "★  " + c.name + " is a favourite" : c.name + " is no longer a favourite");
+        toast(add ? "★  " + c.name + t(" is a favourite", " أضيفت إلى المفضلة")
+                : c.name + t(" is no longer a favourite", " أزيلت من المفضلة"));
     }
 
     private boolean menuOpen() {
@@ -504,7 +605,8 @@ public class MainActivity extends Activity {
         bar.setAlpha(0f);
         manageAdapter.notifyDataSetChanged();
         manageList.requestFocus();
-        manageList.setSelection(Math.max(0, manageRows.indexOf(Action.ADD_PLAYLIST)));
+        manageList.setSelection(Math.max(0, manageRows.indexOf(
+                ChannelList.playlists(this).isEmpty() ? Action.ADD_PLAYLIST : Action.LANGUAGE)));
     }
 
     private void closeManage() {
@@ -529,6 +631,7 @@ public class MainActivity extends Activity {
     }
 
     private void closeMenu() {
+        if (!query.isEmpty()) search.setText("");   // the next time, the whole list
         menu.animate().alpha(0f).translationX(-dp(40)).setDuration(150)
                 .withEndAction(() -> menu.setVisibility(View.GONE)).start();
     }
@@ -596,8 +699,7 @@ public class MainActivity extends Activity {
             Object row = rows.get(position);
             if (row instanceof String) {
                 TextView h = convert instanceof TextView ? (TextView) convert : text(13, 500, 0x99FFFFFF);
-                String ar = ARABIC.get(row);
-                h.setText(((String) row).toUpperCase(Locale.ROOT) + (ar == null ? "" : "  ·  " + ar));
+                h.setText(header((String) row).toUpperCase(Locale.ROOT));
                 h.setLetterSpacing(0.12f);
                 h.setPadding(dp(12), dp(position == 0 ? 4 : 18), 0, dp(8));
                 return h;
@@ -615,12 +717,12 @@ public class MainActivity extends Activity {
                     a.setPadding(dp(16), 0, dp(14), 0);
                 }
                 if (row instanceof Action) {
-                    a.setText(((Action) row).label);
+                    a.setText(t(((Action) row).en, ((Action) row).ar));
                 } else {
                     ChannelList.Playlist p = (ChannelList.Playlist) row;
                     int n = 0;
-                    for (ChannelList.Channel c : channels) if (p.url.equals(c.source)) n++;
-                    a.setText(p.name + "  ·  " + n + " channels");
+                    for (ChannelList.Channel c : channels) if (p.id().equals(c.source)) n++;
+                    a.setText(p.name + "  ·  " + (p.xtream() ? "Xtream  ·  " : "") + count(n));
                 }
                 return a;
             }
@@ -734,7 +836,7 @@ public class MainActivity extends Activity {
         final ChannelList.Channel c = channels.get(index);
         prefs.edit().putString("last", c.key).apply();
         adapter.notifyDataSetChanged();
-        message.setText("Loading…");
+        message.setText(t("Loading…", "جارٍ التحميل…"));
         message.setVisibility(View.VISIBLE);
         if (!menuOpen()) showBar(c, index);
 
@@ -745,25 +847,27 @@ public class MainActivity extends Activity {
         http.setUserAgent(c.userAgent != null ? c.userAgent : DEFAULT_UA).setDefaultRequestProperties(headers);
         final ExoPlayer p = player;
         final int seq = ++playSeq;
-        // Links without .m3u8 or .mpd: look at the first bytes to tell DASH from HLS, once per link.
+        // Links without .m3u8, .mpd or .ts: look at the first bytes to tell DASH, HLS and a plain stream
+        // (MPEG-TS, as Xtream Codes servers send) apart, once per link.
         String lower = c.url.toLowerCase(Locale.ROOT);
         String known = mimes.get(c.url);
-        if (lower.contains(".m3u8") || lower.contains(".mpd") || known != null) {
-            start(p, c.url, known);
+        if (lower.contains(".m3u8") || lower.contains(".mpd") || lower.endsWith(".ts") || known != null) {
+            start(p, c.url, known == null || known.isEmpty() ? null : known);
         } else {
             p.stop();
             io.execute(() -> {
                 String mime = MimeTypes.APPLICATION_M3U8;
                 try {
                     // DASH manifests are XML; HLS playlists start with #EXTM3U.
-                    String head = new String(ChannelList.fetch(c.url, 512), StandardCharsets.UTF_8).trim();
+                    String head = new String(ChannelList.fetch(c.url, 512), StandardCharsets.ISO_8859_1).trim();
                     if (head.startsWith("<")) mime = MimeTypes.APPLICATION_MPD;
+                    else if (!head.startsWith("#EXTM3U")) mime = "";
                 } catch (Exception ignored) {
                 }
                 final String m = mime;
                 main.post(() -> {
                     mimes.put(c.url, m);
-                    if (player == p && playSeq == seq) start(p, c.url, m);
+                    if (player == p && playSeq == seq) start(p, c.url, m.isEmpty() ? null : m);
                 });
             });
         }
@@ -794,8 +898,7 @@ public class MainActivity extends Activity {
 
     private void showBar(ChannelList.Channel c, int index) {
         barName.setText(c.name);
-        String ar = ARABIC.get(c.group);
-        barGroup.setText((index + 1) + "  ·  " + c.group + (ar == null ? "" : "  ·  " + ar));
+        barGroup.setText((index + 1) + "  ·  " + c.group);
         barLogo.setImageDrawable(null);
         loadLogo(c.logo, barLogo::setImageBitmap);
         bar.animate().cancel();
@@ -857,24 +960,40 @@ public class MainActivity extends Activity {
 
     private void run(Action a) {
         switch (a) {
+            case LANGUAGE:
+                new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                        .setTitle(t("Language", "اللغة"))
+                        .setSingleChoiceItems(new String[] {"English", "العربية"}, arabic ? 1 : 0, (d, which) -> {
+                            d.dismiss();
+                            if ((which == 1) == arabic) return;
+                            prefs.edit().putString("language", which == 1 ? "ar" : "en").apply();
+                            recreate();
+                        })
+                        .show();
+                break;
             case ADD:
                 editChannel(null);
                 break;
             case ADD_PLAYLIST:
-                editPlaylist(null);
+                new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                        .setTitle(t("Add a playlist", "إضافة قائمة تشغيل"))
+                        .setItems(new String[] {t("M3U link", "رابط M3U"), "Xtream Codes"},
+                                (d, which) -> editPlaylist(null, which == 1))
+                        .show();
                 break;
             case RELOAD:
                 reload(true);
                 break;
             case RESET:
                 new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                        .setTitle("Undo my changes?")
-                        .setMessage("The channels you added, changed or removed go back to the playlists as they are.")
-                        .setPositiveButton("Undo", (d, w) -> {
+                        .setTitle(t("Undo my changes?", "التراجع عن تغييراتي؟"))
+                        .setMessage(t("The channels you added, changed or removed go back to the playlists as they are.",
+                                "تعود القنوات التي أضفتها أو عدّلتها أو حذفتها كما هي في القوائم."))
+                        .setPositiveButton(t("Undo", "تراجع"), (d, w) -> {
                             ChannelList.resetEdits(this);
                             setChannels(ChannelList.load(this));
                         })
-                        .setNegativeButton("Cancel", null)
+                        .setNegativeButton(t("Cancel", "إلغاء"), null)
                         .show();
                 break;
         }
@@ -883,62 +1002,96 @@ public class MainActivity extends Activity {
     private void playlistOptions(ChannelList.Playlist p) {
         new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
                 .setTitle(p.name)
-                .setItems(new String[] {"Edit", "Reload", "Remove"}, (d, which) -> {
+                .setItems(new String[] {t("Edit", "تعديل"), t("Reload", "إعادة تحميل"), t("Remove", "حذف")}, (d, which) -> {
                     if (which == 0) {
-                        editPlaylist(p);
+                        editPlaylist(p, p.xtream());
                     } else if (which == 1) {
                         reload(true);
                     } else {
                         new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                                .setTitle("Remove " + p.name + "?")
-                                .setMessage("Its channels go too. You can add it again with its link.")
-                                .setPositiveButton("Remove", (d2, w) -> {
-                                    ChannelList.removePlaylist(this, p.url);
+                                .setTitle(t("Remove ", "حذف ") + p.name + t("?", "؟"))
+                                .setMessage(t("Its channels go too. You can add it again later.",
+                                        "ستُحذف قنواتها أيضاً. يمكنك إضافتها من جديد لاحقاً."))
+                                .setPositiveButton(t("Remove", "حذف"), (d2, w) -> {
+                                    ChannelList.removePlaylist(this, p.id());
                                     setChannels(ChannelList.load(this));
-                                    toast(p.name + " removed");
+                                    toast(p.name + t(" removed", " حُذفت"));
                                 })
-                                .setNegativeButton("Cancel", null)
+                                .setNegativeButton(t("Cancel", "إلغاء"), null)
                                 .show();
                     }
                 })
                 .show();
     }
 
-    /** Changes the name or link of p, or adds a playlist when p is null; it must load to be saved. */
-    private void editPlaylist(ChannelList.Playlist p) {
-        EditText name = field("Name", p == null ? "" : p.name, InputType.TYPE_TEXT_FLAG_CAP_WORDS);
-        EditText url = field("Link of the .m3u playlist", p == null ? "" : p.url, InputType.TYPE_TEXT_VARIATION_URI);
+    /**
+     * Changes p, or adds a playlist when p is null: an M3U link, or an Xtream Codes account (server,
+     * username, password). It must load to be saved.
+     */
+    private void editPlaylist(ChannelList.Playlist p, boolean xtream) {
+        EditText name = field(t("Name", "الاسم"), p == null ? "" : p.name, InputType.TYPE_TEXT_FLAG_CAP_WORDS);
+        EditText url = field(xtream ? t("Server, like http://host:port", "الخادم، مثل http://host:port")
+                : t("Link of the .m3u playlist", "رابط قائمة .m3u"), p == null ? "" : p.url, InputType.TYPE_TEXT_VARIATION_URI);
+        EditText user = field(t("Username", "اسم المستخدم"), p == null || p.user == null ? "" : p.user, 0);
+        EditText pass = field(t("Password", "كلمة المرور"), p == null || p.pass == null ? "" : p.pass,
+                InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD);
+        String intro = xtream
+                ? t("The live channels of your Xtream Codes account.", "القنوات المباشرة لحساب Xtream Codes الخاص بك.")
+                : t("An M3U playlist.", "قائمة تشغيل M3U.");
+        intro += t(" They are loaded again each time the app starts; your own changes to them stay.",
+                " تُحمَّل من جديد عند كل تشغيل للتطبيق، وتبقى تغييراتك عليها.");
         AlertDialog d = new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                .setTitle(p == null ? "Add a playlist" : "Edit " + p.name)
-                .setMessage("An M3U playlist. Its channels are loaded again each time the app starts; "
-                        + "your own changes to them stay.")
-                .setView(form(name, url))
-                .setPositiveButton(p == null ? "Add" : "Save", null)
-                .setNegativeButton("Cancel", null)
+                .setTitle(p == null ? (xtream ? "Xtream Codes" : t("Add a playlist", "إضافة قائمة تشغيل"))
+                        : t("Edit ", "تعديل ") + p.name)
+                .setMessage(intro)
+                .setView(xtream ? form(name, url, user, pass) : form(name, url))
+                .setPositiveButton(p == null ? t("Add", "إضافة") : t("Save", "حفظ"), null)
+                .setNegativeButton(t("Cancel", "إلغاء"), null)
                 .show();
+        // Set here rather than in the builder so a mistake keeps the dialog open.
         d.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
             String u = url.getText().toString().trim();
-            if (!u.startsWith("http://") && !u.startsWith("https://")) {
-                url.setError("A link starting with http:// or https://");
-                return;
+            ChannelList.Playlist np;
+            if (xtream) {
+                if (u.isEmpty()) {
+                    url.setError(t("The server", "الخادم مطلوب"));
+                    return;
+                }
+                if (user.getText().toString().trim().isEmpty()) {
+                    user.setError(t("The username", "اسم المستخدم مطلوب"));
+                    return;
+                }
+                np = new ChannelList.Playlist("", ChannelList.server(u));
+                np.user = user.getText().toString().trim();
+                np.pass = pass.getText().toString().trim();
+            } else {
+                if (!u.startsWith("http://") && !u.startsWith("https://")) {
+                    url.setError(t("A link starting with http:// or https://", "رابط يبدأ بـ http:// أو https://"));
+                    return;
+                }
+                np = new ChannelList.Playlist("", u);
             }
             String n = name.getText().toString().trim();
-            if (n.isEmpty()) n = Uri.parse(u).getLastPathSegment() != null ? Uri.parse(u).getLastPathSegment() : "Playlist";
-            final String fn = n;
+            if (n.isEmpty()) n = xtream ? Uri.parse(np.url).getHost() : Uri.parse(u).getLastPathSegment();
+            np.name = n == null || n.isEmpty() ? "Playlist" : n;
             d.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(false);
-            d.setMessage("Loading…");
+            d.setMessage(t("Loading…", "جارٍ التحميل…"));
             io.execute(() -> {
-                int count = ChannelList.addPlaylist(this, fn, u, p == null ? null : p.url);
+                int count = ChannelList.addPlaylist(this, np, p == null ? null : p.id());
                 main.post(() -> {
                     if (isDestroyed()) return;
                     if (count < 0) {
-                        d.setMessage("No channels could be loaded from that link. Check it and try again.");
+                        d.setMessage(xtream
+                                ? t("No channels could be loaded: check the server, username and password.",
+                                        "تعذر تحميل القنوات: تحقق من الخادم واسم المستخدم وكلمة المرور.")
+                                : t("No channels could be loaded from that link. Check it and try again.",
+                                        "تعذر تحميل قنوات من هذا الرابط. تحقق منه وحاول مرة أخرى."));
                         d.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(true);
                         return;
                     }
                     d.dismiss();
                     setChannels(ChannelList.load(this));
-                    toast(fn + ": " + count + " channels");
+                    toast(np.name + ": " + count(count));
                     playIfIdle();
                 });
             });
@@ -949,13 +1102,13 @@ public class MainActivity extends Activity {
         ChannelList.Channel c = channels.get(index);
         new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
                 .setTitle(c.name)
-                .setItems(new String[] {"Edit", "Remove"}, (d, which) -> {
+                .setItems(new String[] {t("Edit", "تعديل"), t("Remove", "حذف")}, (d, which) -> {
                     if (which == 0) {
                         editChannel(c);
                     } else {
                         ChannelList.remove(this, c);
                         setChannels(ChannelList.load(this));
-                        toast(c.name + " removed");
+                        toast(c.name + t(" removed", " حُذفت"));
                     }
                 })
                 .show();
@@ -963,25 +1116,27 @@ public class MainActivity extends Activity {
 
     /** Edits c, or adds a channel when c is null. */
     private void editChannel(ChannelList.Channel c) {
-        EditText name = field("Name", c == null ? "" : c.name, InputType.TYPE_TEXT_FLAG_CAP_WORDS);
-        EditText url = field("Stream link (.m3u8, .mpd)", c == null ? "" : c.url, InputType.TYPE_TEXT_VARIATION_URI);
-        EditText group = field("Group", c == null ? "My channels" : c.group, InputType.TYPE_TEXT_FLAG_CAP_WORDS);
-        EditText logo = field("Logo link (optional)", c == null ? "" : c.logo, InputType.TYPE_TEXT_VARIATION_URI);
+        EditText name = field(t("Name", "الاسم"), c == null ? "" : c.name, InputType.TYPE_TEXT_FLAG_CAP_WORDS);
+        EditText url = field(t("Stream link (.m3u8, .mpd, .ts)", "رابط البث (.m3u8، .mpd، .ts)"), c == null ? "" : c.url,
+                InputType.TYPE_TEXT_VARIATION_URI);
+        EditText group = field(t("Group", "المجموعة"), c == null ? "My channels" : c.group, InputType.TYPE_TEXT_FLAG_CAP_WORDS);
+        EditText logo = field(t("Logo link (optional)", "رابط الشعار (اختياري)"), c == null ? "" : c.logo,
+                InputType.TYPE_TEXT_VARIATION_URI);
         AlertDialog d = new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                .setTitle(c == null ? "Add a channel" : "Edit " + c.name)
+                .setTitle(c == null ? t("Add a channel", "إضافة قناة") : t("Edit ", "تعديل ") + c.name)
                 .setView(form(name, url, group, logo))
-                .setPositiveButton("Save", null)
-                .setNegativeButton("Cancel", null)
+                .setPositiveButton(t("Save", "حفظ"), null)
+                .setNegativeButton(t("Cancel", "إلغاء"), null)
                 .show();
         // Set here rather than in the builder so a missing name or link keeps the dialog open.
         d.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
             String n = name.getText().toString().trim(), u = url.getText().toString().trim();
             if (n.isEmpty()) {
-                name.setError("A name");
+                name.setError(t("A name", "الاسم مطلوب"));
                 return;
             }
             if (!u.startsWith("http://") && !u.startsWith("https://")) {
-                url.setError("A link starting with http:// or https://");
+                url.setError(t("A link starting with http:// or https://", "رابط يبدأ بـ http:// أو https://"));
                 return;
             }
             String g = group.getText().toString().trim();
@@ -1015,6 +1170,26 @@ public class MainActivity extends Activity {
         l.setPadding(dp(24), dp(8), dp(24), 0);
         for (View f : fields) l.addView(f, new LinearLayout.LayoutParams(-1, -2));
         return l;
+    }
+
+    /** The app's own words in the chosen language. */
+    private String t(String en, String ar) {
+        return arabic ? ar : en;
+    }
+
+    private String count(int n) {
+        return t(n == 1 ? "1 channel" : n + " channels", n + " قناة");
+    }
+
+    /** A group header: the app's own groups in the chosen language, a playlist's groups as they are. */
+    private String header(String group) {
+        switch (group) {
+            case FAVORITES: return t("Favorites", "المفضلة");
+            case LANGUAGE: return t("Language", "اللغة");
+            case PLAYLISTS: return t("Playlists", "قوائم التشغيل");
+            case MY_LIST: return t("My list", "قائمتي");
+            default: return group;
+        }
     }
 
     private void toast(String text) {
