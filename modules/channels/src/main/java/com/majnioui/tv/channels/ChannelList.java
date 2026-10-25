@@ -24,17 +24,17 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * The channels. The base list is an M3U playlist at a link the owner can change in the app (by default
- * the playlist in res/values/config.xml); it is fetched each time the app starts, so editing that
- * playlist changes the channels. The last copy that could be fetched is saved, and res/raw/channels.m3u
- * is the copy for the very first start without a network.
+ * The channels. They come from the owner's M3U playlists, added and removed in the app (the first start
+ * has the playlist in res/values/config.xml); the channels of all the playlists are put together. Each
+ * playlist is fetched again every time the app starts, so editing a playlist changes the channels. The
+ * last copy of each that could be fetched is saved, and res/raw/channels.m3u is the copy of the default
+ * playlist for the very first start without a network.
  *
- * On top of the playlist sit the owner's own edits, made in the app: channels removed, changed or
- * added. They are kept apart from the playlist (edits.json) so a new copy of it doesn't undo them.
+ * On top of the playlists sit the owner's own edits, made in the app: channels removed, changed or
+ * added. They are kept apart from the playlists (edits.json) so a new copy of one doesn't undo them.
  */
 final class ChannelList {
     private static final String TAG = "Channels";
-    private static final String SAVED = "playlist.m3u";
     private static final String EDITS = "edits.json";
     private static final Pattern ATTR = Pattern.compile("([a-z-]+)=\"([^\"]*)\"");
     /** "(1080p)", "[Geo-blocked]", "[Not 24/7]": playlist notes, not part of the name. */
@@ -45,8 +45,10 @@ final class ChannelList {
         String key;
         final String id;
         String name, group, logo, url, userAgent, referrer;
-        /** Added in the app rather than in the playlist. */
+        /** Added in the app rather than in a playlist. */
         boolean own;
+        /** The link of the playlist it comes from; null for the owner's own channels. */
+        String source;
 
         Channel(String id, String name, String group, String logo, String url, String userAgent, String referrer) {
             this.id = id;
@@ -59,55 +61,148 @@ final class ChannelList {
         }
     }
 
+    static final class Playlist {
+        String name, url;
+
+        Playlist(String name, String url) {
+            this.name = name;
+            this.url = url;
+        }
+    }
+
     private ChannelList() {
     }
 
-    static String playlist(Context ctx) {
-        return ctx.getSharedPreferences("channels", Context.MODE_PRIVATE)
-                .getString("playlist", ctx.getString(R.string.playlist));
+    // ---- the playlists --------------------------------------------------------------------------
+
+    static List<Playlist> playlists(Context ctx) {
+        List<Playlist> out = new ArrayList<>();
+        String json = prefs(ctx).getString("playlists", null);
+        if (json == null) {
+            // First start, or 2.0 which had a single link and saved it as playlist.m3u.
+            new File(ctx.getFilesDir(), "playlist.m3u").delete();
+            out.add(new Playlist("Free IPTV list", prefs(ctx).getString("playlist", ctx.getString(R.string.playlist))));
+            return out;
+        }
+        try {
+            JSONArray a = new JSONArray(json);
+            for (int i = 0; i < a.length(); i++) {
+                JSONObject o = a.getJSONObject(i);
+                out.add(new Playlist(o.optString("name"), o.optString("url")));
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "playlists: " + e);
+        }
+        return out;
     }
 
-    /** The saved playlist if there is one, else the bundled one, with the edits. Fast; main thread is fine. */
-    static List<Channel> load(Context ctx) {
-        List<Channel> base = null;
-        File saved = new File(ctx.getFilesDir(), SAVED);
+    private static void savePlaylists(Context ctx, List<Playlist> list) {
+        JSONArray a = new JSONArray();
         try {
-            if (saved.isFile()) base = parse(new String(readAll(new FileInputStream(saved)), StandardCharsets.UTF_8));
+            for (Playlist p : list) a.put(new JSONObject().put("name", p.name).put("url", p.url));
         } catch (Exception e) {
-            Log.w(TAG, "saved list: " + e);
+            Log.w(TAG, "save playlists: " + e);
         }
-        if (base == null || base.isEmpty()) {
-            try (InputStream in = ctx.getResources().openRawResource(R.raw.channels)) {
-                base = parse(new String(readAll(in), StandardCharsets.UTF_8));
+        prefs(ctx).edit().putString("playlists", a.toString()).apply();
+    }
+
+    /**
+     * Fetches the playlist at url and adds it, or replaces the playlist at old (a changed name or link);
+     * returns the number of its channels, or -1 when it can't be fetched or has none (nothing changes
+     * then). Blocking: run off the main thread.
+     */
+    static int addPlaylist(Context ctx, String name, String url, String old) {
+        int n = fetchPlaylist(ctx, url);
+        if (n <= 0) return -1;
+        List<Playlist> list = playlists(ctx);
+        int at = list.size();
+        for (int i = 0; i < list.size(); i++) {
+            if (list.get(i).url.equals(old)) at = i;
+        }
+        for (int i = list.size() - 1; i >= 0; i--) {
+            if (list.get(i).url.equals(url) || list.get(i).url.equals(old)) list.remove(i);
+        }
+        list.add(Math.min(at, list.size()), new Playlist(name, url));
+        savePlaylists(ctx, list);
+        if (old != null && !old.equals(url)) saved(ctx, old).delete();
+        return n;
+    }
+
+    /** Takes a playlist and its channels out of the list. */
+    static void removePlaylist(Context ctx, String url) {
+        List<Playlist> list = playlists(ctx);
+        for (int i = list.size() - 1; i >= 0; i--) if (list.get(i).url.equals(url)) list.remove(i);
+        savePlaylists(ctx, list);
+        saved(ctx, url).delete();
+    }
+
+    /**
+     * Fetches every playlist again; returns the new list, or null when none could be fetched (the saved
+     * copies are kept then). Blocking: run off the main thread.
+     */
+    static List<Channel> refresh(Context ctx) {
+        boolean any = false;
+        for (Playlist p : playlists(ctx)) any |= fetchPlaylist(ctx, p.url) > 0;
+        return any ? load(ctx) : null;
+    }
+
+    /** Fetches one playlist and saves it if it has channels; returns how many, or -1. */
+    static int fetchPlaylist(Context ctx, String url) {
+        try {
+            byte[] data = fetch(url);
+            int n = parse(new String(data, StandardCharsets.UTF_8)).size();
+            if (n == 0) {
+                Log.w(TAG, "playlist " + url + ": no channels");
+                return -1;
+            }
+            try (FileOutputStream out = new FileOutputStream(saved(ctx, url))) {
+                out.write(data);
+            }
+            return n;
+        } catch (Exception e) {
+            Log.w(TAG, "playlist " + url + ": " + e);
+            return -1;
+        }
+    }
+
+    /** The saved copies of the playlists, with the edits. Fast; main thread is fine. */
+    static List<Channel> load(Context ctx) {
+        List<Channel> base = new ArrayList<>();
+        Set<String> keys = new HashSet<>();
+        for (Playlist p : playlists(ctx)) {
+            List<Channel> list = null;
+            File f = saved(ctx, p.url);
+            try {
+                if (f.isFile()) list = parse(new String(readAll(new FileInputStream(f)), StandardCharsets.UTF_8));
             } catch (Exception e) {
-                Log.w(TAG, "bundled list: " + e);
-                base = new ArrayList<>();
+                Log.w(TAG, "saved " + p.url + ": " + e);
+            }
+            if ((list == null || list.isEmpty()) && p.url.equals(ctx.getString(R.string.playlist))) {
+                try (InputStream in = ctx.getResources().openRawResource(R.raw.channels)) {
+                    list = parse(new String(readAll(in), StandardCharsets.UTF_8));
+                } catch (Exception e) {
+                    Log.w(TAG, "bundled list: " + e);
+                }
+            }
+            if (list == null) continue;
+            for (Channel c : list) {
+                // The same channel in two playlists: both stay, with keys of their own.
+                String key = c.key;
+                for (int n = 2; !keys.add(key); n++) key = c.key + "#" + n;
+                c.key = key;
+                c.source = p.url;
+                base.add(c);
             }
         }
         return applyEdits(ctx, base);
     }
 
-    /**
-     * Fetches the playlist at src and saves it, and src becomes the playlist link; returns the new list,
-     * or null when it can't be fetched or has no channels (the link and the saved copy stay as they were
-     * then). Blocking: run off the main thread.
-     */
-    static List<Channel> refresh(Context ctx, String src) {
-        try {
-            byte[] data = fetch(src);
-            if (parse(new String(data, StandardCharsets.UTF_8)).isEmpty()) {
-                Log.w(TAG, "playlist " + src + ": no channels");
-                return null;
-            }
-            try (FileOutputStream out = new FileOutputStream(new File(ctx.getFilesDir(), SAVED))) {
-                out.write(data);
-            }
-            ctx.getSharedPreferences("channels", Context.MODE_PRIVATE).edit().putString("playlist", src).apply();
-            return load(ctx);
-        } catch (Exception e) {
-            Log.w(TAG, "playlist " + src + ": " + e);
-            return null;
-        }
+    private static File saved(Context ctx, String url) {
+        return new File(ctx.getFilesDir(), "playlist-" + Integer.toHexString(url.hashCode()) + ".m3u");
+    }
+
+    private static android.content.SharedPreferences prefs(Context ctx) {
+        return ctx.getSharedPreferences("channels", Context.MODE_PRIVATE);
     }
 
     // ---- the owner's edits ----------------------------------------------------------------------

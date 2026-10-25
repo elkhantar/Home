@@ -56,12 +56,12 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
- * Free IPTV: live channels from an M3U playlist (see ChannelList), like a TV's own channel app: it
- * opens on the last channel, full screen. OK opens the channel list on the left (Up/Down to move,
- * Left/Right to jump between groups, OK to watch, hold OK or Menu to edit or remove a channel, Back to
- * close); without it, Up/Down and CH+/CH- switch channels and Back leaves. Below the channels, "My list"
- * adds a channel, changes the playlist link, reloads it and undoes the edits. The list is a ListView, so
- * only the rows on screen exist, however many channels there are.
+ * Free IPTV: live channels from the owner's M3U playlists (see ChannelList), like a TV's own channel
+ * app: it opens on the last channel, full screen. OK opens the channel list on the left (Up/Down to
+ * move, Left/Right to jump between groups, OK to watch, hold OK or Menu to edit or remove a channel,
+ * Back to close); without it, Up/Down and CH+/CH- switch channels and Back leaves. Below the channels,
+ * "Playlists" adds, changes, reloads and removes whole playlists, and "My list" adds a channel and undoes
+ * the edits. The list is a ListView, so only the rows on screen exist, however many channels there are.
  *
  * One player plays every channel: switching only changes what it plays, and playback starts after a
  * second of video rather than ExoPlayer's default of two and a half.
@@ -85,13 +85,15 @@ public class MainActivity extends Activity {
         ARABIC.put("Music", "الموسيقى");
         ARABIC.put("Family", "العائلة");
         ARABIC.put("Business", "الاقتصاد");
+        ARABIC.put("Playlists", "قوائم التشغيل");
+        ARABIC.put("My list", "قائمتي");
     }
 
-    /** The rows under the channels, in the "My list" group. */
+    /** The rows under the channels, in the "Playlists" and "My list" groups. */
     private enum Action {
+        ADD_PLAYLIST("＋  Add a playlist"),
+        RELOAD("Reload the playlists"),
         ADD("＋  Add a channel"),
-        PLAYLIST("Playlist link"),
-        RELOAD("Reload the playlist"),
         RESET("Undo my changes");
 
         final String label;
@@ -101,7 +103,7 @@ public class MainActivity extends Activity {
         }
     }
 
-    private static final String MY_LIST = "My list";
+    private static final String PLAYLISTS = "Playlists", MY_LIST = "My list";
 
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ExecutorService io = Executors.newFixedThreadPool(3);
@@ -111,7 +113,10 @@ public class MainActivity extends Activity {
     private SharedPreferences prefs;
 
     private List<ChannelList.Channel> channels = new ArrayList<>();
-    /** List rows: a String is a group header, an Integer the index of a channel, an Action an action. */
+    /**
+     * List rows: a String is a group header, an Integer the index of a channel, a Playlist a playlist,
+     * an Action an action.
+     */
     private final List<Object> rows = new ArrayList<>();
     private int current = -1;
 
@@ -156,24 +161,28 @@ public class MainActivity extends Activity {
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
 
         setChannels(ChannelList.load(this));
-        // The playlist is small: fetch it on every start so edits to it show up right away.
-        reload(ChannelList.playlist(this), false);
+        // Playlists are small: fetch them on every start so edits to them show up right away.
+        reload(false);
     }
 
-    /** Fetches the playlist at url in the background; it becomes the playlist link if it has channels. */
-    private void reload(String url, boolean tell) {
-        if (tell) menuStatus.setText("Loading the playlist…");
+    /** Fetches every playlist again in the background. */
+    private void reload(boolean tell) {
+        if (tell) menuStatus.setText("Loading the playlists…");
         io.execute(() -> {
-            List<ChannelList.Channel> fresh = ChannelList.refresh(this, url);
+            List<ChannelList.Channel> fresh = ChannelList.refresh(this);
             main.post(() -> {
                 if (isDestroyed()) return;
                 if (fresh != null) setChannels(fresh);
                 else menuStatus.setText(channels.size() + " channels");
-                if (tell) toast(fresh != null ? fresh.size() + " channels loaded"
-                        : "Couldn't load a playlist from that link");
-                if (fresh != null && current < 0 && !channels.isEmpty() && player != null) play(0);
+                if (tell) toast(fresh != null ? fresh.size() + " channels" : "Couldn't load the playlists");
+                playIfIdle();
             });
         });
+    }
+
+    /** After channels arrive in an empty list: start the first one. */
+    private void playIfIdle() {
+        if (current < 0 && !channels.isEmpty() && player != null) play(0);
     }
 
     @Override
@@ -209,7 +218,7 @@ public class MainActivity extends Activity {
             }
         });
         if (channels.isEmpty()) {
-            message.setText("No channels yet.\nOK for the list, then My list to add some.");
+            message.setText("No channels yet.\nOK for the list, then Add a playlist.");
             message.setVisibility(View.VISIBLE);
             return;
         }
@@ -251,8 +260,13 @@ public class MainActivity extends Activity {
             }
             rows.add(i);
         }
+        rows.add(PLAYLISTS);
+        rows.addAll(ChannelList.playlists(this));
+        rows.add(Action.ADD_PLAYLIST);
+        rows.add(Action.RELOAD);
         rows.add(MY_LIST);
-        for (Action a : Action.values()) if (a != Action.RESET || ChannelList.hasEdits(this)) rows.add(a);
+        rows.add(Action.ADD);
+        if (ChannelList.hasEdits(this)) rows.add(Action.RESET);
         current = playingKey != null ? indexOf(playingKey) : -1;
         menuStatus.setText(channels.size() + " channels");
         adapter.notifyDataSetChanged();
@@ -310,6 +324,8 @@ public class MainActivity extends Activity {
                 closeMenu();
             } else if (row instanceof Action) {
                 run((Action) row);
+            } else if (row instanceof ChannelList.Playlist) {
+                playlistOptions((ChannelList.Playlist) row);
             }
         });
         list.setOnItemLongClickListener((parent, view, position, id) -> {
@@ -355,7 +371,7 @@ public class MainActivity extends Activity {
         adapter.notifyDataSetChanged();
         list.requestFocus();
         int row = rows.indexOf(current >= 0 ? current : 0);
-        if (row < 0) row = rows.indexOf(Action.ADD);
+        if (row < 0) row = rows.indexOf(Action.ADD_PLAYLIST);
         list.setSelectionFromTop(Math.max(0, row), dp(140));
     }
 
@@ -427,7 +443,7 @@ public class MainActivity extends Activity {
                 h.setPadding(dp(12), dp(position == 0 ? 4 : 18), 0, dp(8));
                 return h;
             }
-            if (row instanceof Action) {
+            if (!(row instanceof Integer)) {
                 TextView a;
                 if (convert instanceof TextView) {
                     a = (TextView) convert;
@@ -439,7 +455,14 @@ public class MainActivity extends Activity {
                     a.setMinHeight(dp(48));
                     a.setPadding(dp(16), 0, dp(14), 0);
                 }
-                a.setText(((Action) row).label);
+                if (row instanceof Action) {
+                    a.setText(((Action) row).label);
+                } else {
+                    ChannelList.Playlist p = (ChannelList.Playlist) row;
+                    int n = 0;
+                    for (ChannelList.Channel c : channels) if (p.url.equals(c.source)) n++;
+                    a.setText(p.name + "  ·  " + n + " channels");
+                }
                 return a;
             }
             RowHolder holder;
@@ -664,28 +687,16 @@ public class MainActivity extends Activity {
             case ADD:
                 editChannel(null);
                 break;
-            case PLAYLIST: {
-                EditText link = field("https://…/playlist.m3u", ChannelList.playlist(this), InputType.TYPE_TEXT_VARIATION_URI);
-                new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                        .setTitle("Playlist link")
-                        .setMessage("An M3U playlist. The channels come from it each time the app starts; "
-                                + "your own changes stay. Leave it empty for the default playlist.")
-                        .setView(form(link))
-                        .setPositiveButton("Load", (d, w) -> {
-                            String url = link.getText().toString().trim();
-                            reload(url.isEmpty() ? getString(R.string.playlist) : url, true);
-                        })
-                        .setNegativeButton("Cancel", null)
-                        .show();
+            case ADD_PLAYLIST:
+                editPlaylist(null);
                 break;
-            }
             case RELOAD:
-                reload(ChannelList.playlist(this), true);
+                reload(true);
                 break;
             case RESET:
                 new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
                         .setTitle("Undo my changes?")
-                        .setMessage("The channels you added, changed or removed go back to the playlist as it is.")
+                        .setMessage("The channels you added, changed or removed go back to the playlists as they are.")
                         .setPositiveButton("Undo", (d, w) -> {
                             ChannelList.resetEdits(this);
                             setChannels(ChannelList.load(this));
@@ -694,6 +705,71 @@ public class MainActivity extends Activity {
                         .show();
                 break;
         }
+    }
+
+    private void playlistOptions(ChannelList.Playlist p) {
+        new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                .setTitle(p.name)
+                .setItems(new String[] {"Edit", "Reload", "Remove"}, (d, which) -> {
+                    if (which == 0) {
+                        editPlaylist(p);
+                    } else if (which == 1) {
+                        reload(true);
+                    } else {
+                        new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                                .setTitle("Remove " + p.name + "?")
+                                .setMessage("Its channels go too. You can add it again with its link.")
+                                .setPositiveButton("Remove", (d2, w) -> {
+                                    ChannelList.removePlaylist(this, p.url);
+                                    setChannels(ChannelList.load(this));
+                                    toast(p.name + " removed");
+                                })
+                                .setNegativeButton("Cancel", null)
+                                .show();
+                    }
+                })
+                .show();
+    }
+
+    /** Changes the name or link of p, or adds a playlist when p is null; it must load to be saved. */
+    private void editPlaylist(ChannelList.Playlist p) {
+        EditText name = field("Name", p == null ? "" : p.name, InputType.TYPE_TEXT_FLAG_CAP_WORDS);
+        EditText url = field("Link of the .m3u playlist", p == null ? "" : p.url, InputType.TYPE_TEXT_VARIATION_URI);
+        AlertDialog d = new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                .setTitle(p == null ? "Add a playlist" : "Edit " + p.name)
+                .setMessage("An M3U playlist. Its channels are loaded again each time the app starts; "
+                        + "your own changes to them stay.")
+                .setView(form(name, url))
+                .setPositiveButton(p == null ? "Add" : "Save", null)
+                .setNegativeButton("Cancel", null)
+                .show();
+        d.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
+            String u = url.getText().toString().trim();
+            if (!u.startsWith("http://") && !u.startsWith("https://")) {
+                url.setError("A link starting with http:// or https://");
+                return;
+            }
+            String n = name.getText().toString().trim();
+            if (n.isEmpty()) n = Uri.parse(u).getLastPathSegment() != null ? Uri.parse(u).getLastPathSegment() : "Playlist";
+            final String fn = n;
+            d.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(false);
+            d.setMessage("Loading…");
+            io.execute(() -> {
+                int count = ChannelList.addPlaylist(this, fn, u, p == null ? null : p.url);
+                main.post(() -> {
+                    if (isDestroyed()) return;
+                    if (count < 0) {
+                        d.setMessage("No channels could be loaded from that link. Check it and try again.");
+                        d.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(true);
+                        return;
+                    }
+                    d.dismiss();
+                    setChannels(ChannelList.load(this));
+                    toast(fn + ": " + count + " channels");
+                    playIfIdle();
+                });
+            });
+        });
     }
 
     private void channelOptions(int index) {
