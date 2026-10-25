@@ -44,6 +44,8 @@ import androidx.media3.exoplayer.DefaultLoadControl;
 import androidx.media3.exoplayer.ExoPlayer;
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory;
 
+import org.json.JSONArray;
+
 import java.io.File;
 import java.io.FileOutputStream;
 import java.nio.charset.StandardCharsets;
@@ -57,11 +59,14 @@ import java.util.concurrent.Executors;
 
 /**
  * M3U Lite: live channels from the owner's M3U playlists (see ChannelList), like a TV's own channel
- * app: it opens on the last channel, full screen. OK opens the channel list on the left (Up/Down to
- * move, Left/Right to jump between groups, OK to watch, hold OK or Menu to edit or remove a channel,
- * Back to close); without it, Up/Down and CH+/CH- switch channels and Back leaves. Below the channels,
- * "Playlists" adds, changes, reloads and removes whole playlists, and "My list" adds a channel and undoes
- * the edits. The list is a ListView, so only the rows on screen exist, however many channels there are.
+ * app: it opens on the last channel, full screen. OK opens the channel list on the left: Up/Down to
+ * move (past the last channel back to the first and the other way round), Left/Right to jump between
+ * groups, OK to watch, hold OK to make a channel a favourite (favourites come first), Menu to edit or
+ * remove it, Back to close. Without the list, Up/Down and CH+/CH- switch channels and Back leaves.
+ *
+ * Left twice, in the list or while watching, opens the other panel: the playlists (add, change, reload,
+ * remove) and the owner's own channels. The lists are ListViews, so only the rows on screen exist,
+ * however many channels there are.
  *
  * One player plays every channel: switching only changes what it plays, and playback starts after a
  * second of video rather than ExoPlayer's default of two and a half.
@@ -85,11 +90,12 @@ public class MainActivity extends Activity {
         ARABIC.put("Music", "الموسيقى");
         ARABIC.put("Family", "العائلة");
         ARABIC.put("Business", "الاقتصاد");
+        ARABIC.put("Favorites", "المفضلة");
         ARABIC.put("Playlists", "قوائم التشغيل");
         ARABIC.put("My list", "قائمتي");
     }
 
-    /** The rows under the channels, in the "Playlists" and "My list" groups. */
+    /** The rows of the playlists panel, with its "Playlists" and "My list" groups. */
     private enum Action {
         ADD_PLAYLIST("＋  Add a playlist"),
         RELOAD("Reload the playlists"),
@@ -103,7 +109,9 @@ public class MainActivity extends Activity {
         }
     }
 
-    private static final String PLAYLISTS = "Playlists", MY_LIST = "My list";
+    private static final String FAVORITES = "Favorites", PLAYLISTS = "Playlists", MY_LIST = "My list";
+    /** Two Left presses this close together open the playlists panel. */
+    private static final long DOUBLE_MS = 450;
 
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ExecutorService io = Executors.newFixedThreadPool(3);
@@ -112,13 +120,20 @@ public class MainActivity extends Activity {
     private int accent;
     private SharedPreferences prefs;
 
+    /** The channels as ChannelList gives them; channels is the same with the favourites first. */
+    private List<ChannelList.Channel> loaded = new ArrayList<>();
     private List<ChannelList.Channel> channels = new ArrayList<>();
-    /**
-     * List rows: a String is a group header, an Integer the index of a channel, a Playlist a playlist,
-     * an Action an action.
-     */
+    /** Keys of the favourite channels, in the order they were chosen. */
+    private final List<String> favorites = new ArrayList<>();
+    private int favoriteCount;
+    /** Rows of the channel list: a String is a group header, an Integer the index of a channel. */
     private final List<Object> rows = new ArrayList<>();
+    /** Rows of the playlists panel: a String is a group header, then Playlists and Actions. */
+    private final List<Object> manageRows = new ArrayList<>();
     private int current = -1;
+    /** When Left was last pressed, and the list row it was pressed on, for the double press. */
+    private long lastLeft;
+    private int leftFrom = -1;
 
     private FrameLayout root;
     private SurfaceView surface;
@@ -126,10 +141,11 @@ public class MainActivity extends Activity {
     private LinearLayout bar;
     private ImageView barLogo;
     private TextView barName, barGroup;
-    private LinearLayout menu;
-    private ListView list;
+    private LinearLayout menu, manage;
+    private ListView list, manageList;
     private TextView menuStatus;
-    private final RowAdapter adapter = new RowAdapter();
+    private final RowAdapter adapter = new RowAdapter(rows);
+    private final RowAdapter manageAdapter = new RowAdapter(manageRows);
     private ExoPlayer player;
     private final DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory()
             .setAllowCrossProtocolRedirects(true)
@@ -147,6 +163,12 @@ public class MainActivity extends Activity {
         font = getResources().getFont(R.font.outfit);
         accent = getColor(R.color.accent);
         prefs = getSharedPreferences("channels", MODE_PRIVATE);
+        try {
+            JSONArray a = new JSONArray(prefs.getString("favorites", "[]"));
+            for (int i = 0; i < a.length(); i++) favorites.add(a.getString(i));
+        } catch (Exception e) {
+            Log.w(TAG, "favorites: " + e);
+        }
 
         root = new FrameLayout(this);
         root.setBackgroundColor(0xFF000000);
@@ -157,6 +179,7 @@ public class MainActivity extends Activity {
         root.addView(message, new FrameLayout.LayoutParams(-2, -2, Gravity.CENTER));
         buildBar();
         buildMenu();
+        buildManage();
         setContentView(root);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
 
@@ -218,9 +241,9 @@ public class MainActivity extends Activity {
             }
         });
         if (channels.isEmpty()) {
-            message.setText("No channels yet.\nAdd an M3U playlist from the list on the left.");
+            message.setText("No channels yet.\nAdd an M3U playlist on the left.");
             message.setVisibility(View.VISIBLE);
-            openMenu();
+            openManage();
             return;
         }
         int last = indexOf(prefs.getString("last", ""));
@@ -251,26 +274,36 @@ public class MainActivity extends Activity {
         String playingKey = current >= 0 && current < channels.size() ? channels.get(current).key : null;
         String playingUrl = playingKey != null ? channels.get(current).url : null;
         int was = current;
-        channels = fresh;
+        loaded = fresh;
+        // Favourites first, in the order they were chosen; the others as the playlists have them.
+        Map<String, ChannelList.Channel> byKey = new HashMap<>();
+        for (ChannelList.Channel c : fresh) byKey.put(c.key, c);
+        channels = new ArrayList<>(fresh.size());
+        for (String k : favorites) if (byKey.containsKey(k)) channels.add(byKey.remove(k));
+        favoriteCount = channels.size();
+        for (ChannelList.Channel c : fresh) if (byKey.containsKey(c.key)) channels.add(c);
         rows.clear();
         String group = null;
         for (int i = 0; i < channels.size(); i++) {
-            if (!channels.get(i).group.equals(group)) {
-                group = channels.get(i).group;
+            String g = i < favoriteCount ? FAVORITES : channels.get(i).group;
+            if (!g.equals(group)) {
+                group = g;
                 rows.add(group);
             }
             rows.add(i);
         }
-        rows.add(PLAYLISTS);
-        rows.addAll(ChannelList.playlists(this));
-        rows.add(Action.ADD_PLAYLIST);
-        rows.add(Action.RELOAD);
-        rows.add(MY_LIST);
-        rows.add(Action.ADD);
-        if (ChannelList.hasEdits(this)) rows.add(Action.RESET);
+        manageRows.clear();
+        manageRows.add(PLAYLISTS);
+        manageRows.addAll(ChannelList.playlists(this));
+        manageRows.add(Action.ADD_PLAYLIST);
+        manageRows.add(Action.RELOAD);
+        manageRows.add(MY_LIST);
+        manageRows.add(Action.ADD);
+        if (ChannelList.hasEdits(this)) manageRows.add(Action.RESET);
         current = playingKey != null ? indexOf(playingKey) : -1;
         menuStatus.setText(channels.size() + " channels");
         adapter.notifyDataSetChanged();
+        manageAdapter.notifyDataSetChanged();
         if (player == null || playingKey == null) return;
         if (current < 0) {
             if (channels.isEmpty()) {
@@ -293,12 +326,7 @@ public class MainActivity extends Activity {
     // ---- channel list (side menu) ---------------------------------------------------------------
 
     private void buildMenu() {
-        menu = new LinearLayout(this);
-        menu.setOrientation(LinearLayout.VERTICAL);
-        menu.setPadding(dp(28), dp(36), dp(20), dp(24));
-        menu.setBackground(new GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT,
-                new int[] {0xF20B0D10, 0xE60B0D10, 0xB30B0D10}));
-        menu.setVisibility(View.GONE);
+        menu = panel();
 
         TextView title = text(14, 500, 0x99FFFFFF);
         title.setLetterSpacing(0.22f);
@@ -308,37 +336,34 @@ public class MainActivity extends Activity {
         menuStatus.setPadding(0, dp(4), 0, dp(14));
         menu.addView(menuStatus);
 
-        list = new ListView(this);
-        list.setAdapter(adapter);
-        list.setDivider(null);
-        list.setVerticalScrollBarEnabled(false);
-        list.setItemsCanFocus(false);
-        list.setDrawSelectorOnTop(false);
-        GradientDrawable sel = new GradientDrawable();
-        sel.setCornerRadius(dp(12));
-        sel.setColor(0xF5FFFFFF);
-        list.setSelector(sel);
+        list = listView(adapter);
         list.setOnItemClickListener((parent, view, position, id) -> {
             Object row = rows.get(position);
             if (row instanceof Integer) {
                 play((Integer) row);
                 closeMenu();
-            } else if (row instanceof Action) {
-                run((Action) row);
-            } else if (row instanceof ChannelList.Playlist) {
-                playlistOptions((ChannelList.Playlist) row);
             }
         });
         list.setOnItemLongClickListener((parent, view, position, id) -> {
             Object row = rows.get(position);
             if (!(row instanceof Integer)) return false;
-            channelOptions((Integer) row);
+            toggleFavorite((Integer) row);
             return true;
         });
         list.setOnKeyListener((v, keyCode, event) -> {
             if (event.getAction() != KeyEvent.ACTION_DOWN) return false;
-            if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT || keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) {
-                jumpGroup(keyCode == KeyEvent.KEYCODE_DPAD_RIGHT ? 1 : -1);
+            if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT) {
+                if (doubleLeft(event)) {
+                    if (leftFrom >= 0) list.setSelection(leftFrom);   // undo the first press's jump
+                    openManage();
+                } else {
+                    leftFrom = list.getSelectedItemPosition();
+                    jumpGroup(-1);
+                }
+                return true;
+            }
+            if (keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) {
+                jumpGroup(1);
                 return true;
             }
             if (keyCode == KeyEvent.KEYCODE_MENU) {
@@ -346,23 +371,152 @@ public class MainActivity extends Activity {
                 if (pos >= 0 && rows.get(pos) instanceof Integer) channelOptions((Integer) rows.get(pos));
                 return true;
             }
-            return false;
+            return wrap(list, rows, keyCode);
         });
         menu.addView(list, new LinearLayout.LayoutParams(-1, 0, 1f));
-
-        TextView hint = text(12, 400, 0x59FFFFFF);
-        hint.setText("◀ ▶ groups  ·  OK watch  ·  hold OK edit  ·  Back close");
-        hint.setPadding(0, dp(12), 0, 0);
-        menu.addView(hint);
+        menu.addView(hint("◀ ▶ groups  ·  OK watch  ·  hold OK favourite\nMenu edit  ·  ◀◀ playlists  ·  Back close"));
 
         root.addView(menu, new FrameLayout.LayoutParams(dp(400), -1, Gravity.START));
+    }
+
+    /** The playlists panel: in place of the channel list, opened with Left twice. */
+    private void buildManage() {
+        manage = panel();
+        TextView title = text(14, 500, 0x99FFFFFF);
+        title.setLetterSpacing(0.22f);
+        title.setText("M3U LITE");
+        manage.addView(title);
+        TextView sub = text(13, 400, 0x66FFFFFF);
+        sub.setText("Playlists and your own channels");
+        sub.setPadding(0, dp(4), 0, dp(14));
+        manage.addView(sub);
+
+        manageList = listView(manageAdapter);
+        manageList.setOnItemClickListener((parent, view, position, id) -> {
+            Object row = manageRows.get(position);
+            if (row instanceof Action) run((Action) row);
+            else if (row instanceof ChannelList.Playlist) playlistOptions((ChannelList.Playlist) row);
+        });
+        manageList.setOnKeyListener((v, keyCode, event) -> {
+            if (event.getAction() != KeyEvent.ACTION_DOWN) return false;
+            if (keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) {
+                closeManage();
+                if (!channels.isEmpty()) openMenu();
+                return true;
+            }
+            if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT) return true;
+            return wrap(manageList, manageRows, keyCode);
+        });
+        manage.addView(manageList, new LinearLayout.LayoutParams(-1, 0, 1f));
+        manage.addView(hint("OK choose  ·  ▶ channels  ·  Back close"));
+
+        root.addView(manage, new FrameLayout.LayoutParams(dp(400), -1, Gravity.START));
+    }
+
+    private LinearLayout panel() {
+        LinearLayout p = new LinearLayout(this);
+        p.setOrientation(LinearLayout.VERTICAL);
+        p.setPadding(dp(28), dp(36), dp(20), dp(24));
+        p.setBackground(new GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT,
+                new int[] {0xF20B0D10, 0xE60B0D10, 0xB30B0D10}));
+        p.setVisibility(View.GONE);
+        return p;
+    }
+
+    private ListView listView(RowAdapter a) {
+        ListView l = new ListView(this);
+        l.setAdapter(a);
+        l.setDivider(null);
+        l.setVerticalScrollBarEnabled(false);
+        l.setItemsCanFocus(false);
+        l.setDrawSelectorOnTop(false);
+        GradientDrawable sel = new GradientDrawable();
+        sel.setCornerRadius(dp(12));
+        sel.setColor(0xF5FFFFFF);
+        l.setSelector(sel);
+        return l;
+    }
+
+    private TextView hint(String s) {
+        TextView hint = text(12, 400, 0x59FFFFFF);
+        hint.setText(s);
+        hint.setLineSpacing(dp(4), 1f);
+        hint.setPadding(0, dp(12), 0, 0);
+        return hint;
+    }
+
+    /** Up on the first row selects the last one, Down on the last the first. */
+    private boolean wrap(ListView l, List<Object> r, int keyCode) {
+        if (keyCode != KeyEvent.KEYCODE_DPAD_UP && keyCode != KeyEvent.KEYCODE_DPAD_DOWN) return false;
+        boolean up = keyCode == KeyEvent.KEYCODE_DPAD_UP;
+        int pos = l.getSelectedItemPosition();
+        for (int i = up ? pos - 1 : pos + 1; i >= 0 && i < r.size(); i += up ? -1 : 1) {
+            if (!(r.get(i) instanceof String)) return false;   // a row to move to: the list does it
+        }
+        for (int i = up ? r.size() - 1 : 0; i >= 0 && i < r.size(); i += up ? -1 : 1) {
+            if (!(r.get(i) instanceof String)) {
+                // Going down to the top: show the group header above the first row too.
+                l.setSelectionFromTop(i, up ? l.getHeight() - dp(140) : dp(40));
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** True on the second of two quick Left presses (not a held key). */
+    private boolean doubleLeft(KeyEvent event) {
+        if (event.getRepeatCount() > 0) {
+            lastLeft = 0;
+            return false;
+        }
+        long now = event.getEventTime();
+        boolean twice = now - lastLeft < DOUBLE_MS;
+        lastLeft = twice ? 0 : now;
+        return twice;
+    }
+
+    private void toggleFavorite(int index) {
+        ChannelList.Channel c = channels.get(index);
+        boolean add = !favorites.remove(c.key);
+        if (add) favorites.add(c.key);
+        prefs.edit().putString("favorites", new JSONArray(favorites).toString()).apply();
+        setChannels(loaded);
+        list.setSelectionFromTop(Math.max(0, rows.indexOf(indexOf(c.key))), dp(140));
+        toast(add ? "★  " + c.name + " is a favourite" : c.name + " is no longer a favourite");
     }
 
     private boolean menuOpen() {
         return menu.getVisibility() == View.VISIBLE;
     }
 
+    private boolean manageOpen() {
+        return manage.getVisibility() == View.VISIBLE;
+    }
+
+    private void openManage() {
+        menu.animate().cancel();
+        menu.setVisibility(View.GONE);
+        manage.setVisibility(View.VISIBLE);
+        manage.setAlpha(0f);
+        manage.setTranslationX(-dp(40));
+        manage.animate().alpha(1f).translationX(0f).setDuration(180).start();
+        main.removeCallbacks(hideBar);
+        bar.setAlpha(0f);
+        manageAdapter.notifyDataSetChanged();
+        manageList.requestFocus();
+        manageList.setSelection(Math.max(0, manageRows.indexOf(Action.ADD_PLAYLIST)));
+    }
+
+    private void closeManage() {
+        manage.animate().cancel();
+        manage.setVisibility(View.GONE);
+    }
+
     private void openMenu() {
+        if (channels.isEmpty()) {
+            openManage();
+            return;
+        }
         menu.setVisibility(View.VISIBLE);
         menu.setAlpha(0f);
         menu.setTranslationX(-dp(40));
@@ -371,9 +525,7 @@ public class MainActivity extends Activity {
         bar.setAlpha(0f);
         adapter.notifyDataSetChanged();
         list.requestFocus();
-        int row = rows.indexOf(current >= 0 ? current : 0);
-        if (row < 0) row = rows.indexOf(Action.ADD_PLAYLIST);
-        list.setSelectionFromTop(Math.max(0, row), dp(140));
+        list.setSelectionFromTop(Math.max(0, rows.indexOf(current >= 0 ? current : 0)), dp(140));
     }
 
     private void closeMenu() {
@@ -397,6 +549,12 @@ public class MainActivity extends Activity {
     }
 
     private final class RowAdapter extends BaseAdapter {
+        private final List<Object> rows;
+
+        RowAdapter(List<Object> rows) {
+            this.rows = rows;
+        }
+
         @Override
         public int getCount() {
             return rows.size();
@@ -648,6 +806,14 @@ public class MainActivity extends Activity {
 
     @Override
     public boolean onKeyDown(int keyCode, KeyEvent event) {
+        if (manageOpen()) {
+            if (keyCode == KeyEvent.KEYCODE_BACK) {
+                manage.animate().alpha(0f).translationX(-dp(40)).setDuration(150)
+                        .withEndAction(() -> manage.setVisibility(View.GONE)).start();
+                return true;
+            }
+            return super.onKeyDown(keyCode, event);
+        }
         if (menuOpen()) {
             if (keyCode == KeyEvent.KEYCODE_BACK) {
                 closeMenu();
@@ -672,6 +838,12 @@ public class MainActivity extends Activity {
                 play(current + 1);
                 return true;
             case KeyEvent.KEYCODE_DPAD_LEFT:
+                if (doubleLeft(event)) {
+                    openManage();
+                    return true;
+                }
+                if (current >= 0) showBar(channels.get(current), current);
+                return true;
             case KeyEvent.KEYCODE_DPAD_RIGHT:
             case KeyEvent.KEYCODE_INFO:
                 if (current >= 0) showBar(channels.get(current), current);
@@ -823,7 +995,7 @@ public class MainActivity extends Activity {
             setChannels(ChannelList.load(this));
             if (c == null) {
                 play(indexOf(e.key));
-                closeMenu();
+                closeManage();
             }
         });
     }
