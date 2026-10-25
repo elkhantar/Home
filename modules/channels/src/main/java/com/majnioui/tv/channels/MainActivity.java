@@ -56,7 +56,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
- * Free IPTV: live channels from the owner's M3U playlists (see ChannelList), like a TV's own channel
+ * M3U Lite: live channels from the owner's M3U playlists (see ChannelList), like a TV's own channel
  * app: it opens on the last channel, full screen. OK opens the channel list on the left (Up/Down to
  * move, Left/Right to jump between groups, OK to watch, hold OK or Menu to edit or remove a channel,
  * Back to close); without it, Up/Down and CH+/CH- switch channels and Back leaves. Below the channels,
@@ -218,8 +218,9 @@ public class MainActivity extends Activity {
             }
         });
         if (channels.isEmpty()) {
-            message.setText("No channels yet.\nOK for the list, then Add a playlist.");
+            message.setText("No channels yet.\nAdd an M3U playlist from the list on the left.");
             message.setVisibility(View.VISIBLE);
+            openMenu();
             return;
         }
         int last = indexOf(prefs.getString("last", ""));
@@ -301,7 +302,7 @@ public class MainActivity extends Activity {
 
         TextView title = text(14, 500, 0x99FFFFFF);
         title.setLetterSpacing(0.22f);
-        title.setText("FREE IPTV");
+        title.setText("M3U LITE");
         menu.addView(title);
         menuStatus = text(13, 400, 0x66FFFFFF);
         menuStatus.setPadding(0, dp(4), 0, dp(14));

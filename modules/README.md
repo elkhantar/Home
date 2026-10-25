@@ -1,7 +1,7 @@
 # Modules
 
 Three small Android TV apps that show up on the CleanXiaomiTV home screen as **module cards**
-(see [`docs/modules.md`](../docs/modules.md)). Weather and Prayer Times are about 170 KB and Free IPTV about 750 KB (it includes a video player).
+(see [`docs/modules.md`](../docs/modules.md)). Weather and Prayer Times are about 170 KB and M3U Lite about 750 KB (it includes a video player).
 None of them runs in the background, and each uses the network only to fetch its own data.
 
 | | |
@@ -9,7 +9,7 @@ None of them runs in the background, and each uses the network only to fetch its
 | ![Weather](docs/weather.png) | ![Prayer Times](docs/prayer.png) |
 | **Weather**: today and a 7-day forecast from [Open-Meteo](https://open-meteo.com). **Change city** searches any city with the remote; **Refresh** reloads. | **Prayer Times**: today's times from [Aladhan](https://aladhan.com) (Morocco method), with the next prayer and a countdown. |
 | ![The channel list over a channel playing](docs/channels.png) | ![A channel playing](docs/channels-playing.png) |
-| **Free IPTV**: live channels from your M3U playlists (the first start has [this gist](https://gist.github.com/majnioui/02e7dc355bc314d5c86f87db150ef98f)). It opens on the last channel; OK shows the channel list on the side (Left / Right jump between groups), Up / Down or CH+ / CH- switch channels. Hold OK (or Menu) on a channel to edit or remove it. Under the channels, **Playlists** adds a whole playlist by its link, and each playlist there can be edited, reloaded or removed with all its channels; **My list** adds a single channel or undoes your changes. | Every playlist is fetched each time the app starts, so editing one changes the channels; the last copy of each is kept for when it can't be reached, and `channels/src/main/res/raw/channels.m3u` is the copy of the gist for a first start offline. Changes made to channels in the app are kept apart from the playlists, so a new copy doesn't undo them. |
+| **M3U Lite**: a player for your own M3U playlists; it comes with none. It opens on the last channel; OK shows the channel list on the side (Left / Right jump between groups), Up / Down or CH+ / CH- switch channels. Hold OK (or Menu) on a channel to edit or remove it. Under the channels, **Playlists** adds a whole playlist by its link, and each playlist there can be edited, reloaded or removed with all its channels; **My list** adds a single channel or undoes your changes. | Every playlist is fetched each time the app starts, so editing one changes the channels; the last copy of each is kept for when it can't be reached. Changes made to channels in the app are kept apart from the playlists, so a new copy doesn't undo them. To add a playlist from a computer instead of typing it with the remote: `tools/tv.py "am broadcast -n com.majnioui.tv.channels/.AddPlaylist --es url <link> --es name <name>"` (only the ADB shell may send it). |
 
 ## Install
 

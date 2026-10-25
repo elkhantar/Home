@@ -24,11 +24,10 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * The channels. They come from the owner's M3U playlists, added and removed in the app (the first start
- * has the playlist in res/values/config.xml); the channels of all the playlists are put together. Each
+ * The channels. They come from the owner's M3U playlists, added and removed in the app (there are none
+ * at first: the app is only a player); the channels of all the playlists are put together. Each
  * playlist is fetched again every time the app starts, so editing a playlist changes the channels. The
- * last copy of each that could be fetched is saved, and res/raw/channels.m3u is the copy of the default
- * playlist for the very first start without a network.
+ * last copy of each that could be fetched is saved for when it can't be reached.
  *
  * On top of the playlists sit the owner's own edits, made in the app: channels removed, changed or
  * added. They are kept apart from the playlists (edits.json) so a new copy of one doesn't undo them.
@@ -78,12 +77,7 @@ final class ChannelList {
     static List<Playlist> playlists(Context ctx) {
         List<Playlist> out = new ArrayList<>();
         String json = prefs(ctx).getString("playlists", null);
-        if (json == null) {
-            // First start, or 2.0 which had a single link and saved it as playlist.m3u.
-            new File(ctx.getFilesDir(), "playlist.m3u").delete();
-            out.add(new Playlist("Free IPTV list", prefs(ctx).getString("playlist", ctx.getString(R.string.playlist))));
-            return out;
-        }
+        if (json == null) return out;
         try {
             JSONArray a = new JSONArray(json);
             for (int i = 0; i < a.length(); i++) {
@@ -176,13 +170,6 @@ final class ChannelList {
                 if (f.isFile()) list = parse(new String(readAll(new FileInputStream(f)), StandardCharsets.UTF_8));
             } catch (Exception e) {
                 Log.w(TAG, "saved " + p.url + ": " + e);
-            }
-            if ((list == null || list.isEmpty()) && p.url.equals(ctx.getString(R.string.playlist))) {
-                try (InputStream in = ctx.getResources().openRawResource(R.raw.channels)) {
-                    list = parse(new String(readAll(in), StandardCharsets.UTF_8));
-                } catch (Exception e) {
-                    Log.w(TAG, "bundled list: " + e);
-                }
             }
             if (list == null) continue;
             for (Channel c : list) {

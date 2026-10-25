@@ -1,7 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <color name="accent">#E5484D</color>
-    <!-- The playlist of the first start; the owner adds and removes playlists in the app. The latest
-         revision of the gist, so editing the gist changes the channels on the next start. -->
-    <string name="playlist" translatable="false">https://gist.githubusercontent.com/majnioui/02e7dc355bc314d5c86f87db150ef98f/raw/freeiptvlist.m3u</string>
 </resources>

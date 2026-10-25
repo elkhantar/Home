@@ -27,7 +27,7 @@
 - **Now playing**: while Spotify or another music app plays, a slim glass pill under the top buttons with the cover, song, artist and previous / play-pause / next, tinted in the cover's colour. Hold OK on it to open the app.
 - **Screensaver**: photos of the day with a slow zoom, the time, weather and today's prayer times top left, the song playing bottom left, and a thikr with its source bottom right, a new one every minute.
 - **Your choice**: prayer times on Home, prayer times on the screensaver and athkar can each be switched On or Off from the Settings button, no rebuild needed.
-- **Apps** in [`modules/`](modules/): **Weather** (7-day forecast, city search), **Prayer Times** (Morocco method, countdown to the next prayer) and **Free IPTV** (live channels from M3U playlists you add and remove on the TV, plus single channels you add, change or remove). They show up on the home screen as cards.
+- **Apps** in [`modules/`](modules/): **Weather** (7-day forecast, city search), **Prayer Times** (Morocco method, countdown to the next prayer) and **M3U Lite** (a player for your own M3U playlists, added and removed on the TV). They show up on the home screen as cards.
 
 ## Install
 
@@ -71,7 +71,7 @@ This re-enables every package in the list, gives Home back to the stock Google T
 No analytics and no accounts. The only requests the TV makes for these features go to:
 [Open-Meteo](https://open-meteo.com) for the weather (only the city's coordinates), Bing's photo of the day
 archive for the home screen and the screensaver, [Aladhan](https://aladhan.com) for prayer times,
-the channel playlist and the broadcasters' own streams for Free IPTV, and AdGuard as the DNS resolver. Each can be
+the playlists you add to M3U Lite and their streams, and AdGuard as the DNS resolver. Each can be
 switched off in `config.xml` (or by not installing that app).
 
 ## Credits
