@@ -1,15 +1,16 @@
 # Modules
 
-Three small Android TV apps that show up on the CleanXiaomiTV home screen as **module cards**
-(see [`docs/modules.md`](../docs/modules.md)). Weather and Prayer Times are about 170 KB and M3U Lite about 750 KB (it includes a video player).
+Two small Android TV apps that show up on the CleanXiaomiTV home screen as **module cards**
+(see [`docs/modules.md`](../docs/modules.md)), about 170 KB each.
 None of them runs in the background, and each uses the network only to fetch its own data.
 
 | | |
 |---|---|
 | ![Weather](docs/weather.png) | ![Prayer Times](docs/prayer.png) |
 | **Weather**: today and a 7-day forecast from [Open-Meteo](https://open-meteo.com). **Change city** searches any city with the remote; **Refresh** reloads. | **Prayer Times**: today's times from [Aladhan](https://aladhan.com) (Morocco method), with the next prayer and a countdown. |
-| ![The channel list over a channel playing](docs/channels.png) | ![A channel playing](docs/channels-playing.png) |
-| **M3U Lite**: an IPTV player for your own M3U playlists and Xtream Codes accounts; it comes with none. It opens on the last channel; OK shows the channel list on the side, with a search box at the top (Up / Down go round from the last channel to the first, Left / Right jump between groups), Up / Down or CH+ / CH- switch channels. Hold OK on a channel to make it a favourite: favourites come first. Menu edits or removes a channel. Left twice opens **Settings**: the language (English or Arabic), your playlists (add an M3U link or an Xtream Codes account; edit, reload or remove one with all its channels) and your own channels. | Every playlist is fetched each time the app starts, so editing one changes the channels; the last copy of each is kept for when it can't be reached. An Xtream Codes account gives its live channels, grouped by its categories. Changes made to channels in the app are kept apart from the playlists, so a new copy doesn't undo them. To add a playlist from a computer instead of typing it with the remote: `tools/tv.py "am broadcast -n com.majnioui.tv.channels/.AddPlaylist --es url <link> --es name <name>"`, and for Xtream Codes `--es url http://host:port --es user <user> --es pass <password>` (only the ADB shell may send it). |
+
+For live TV, [**M3U Lite**](https://github.com/majnioui/m3u-lite) (an IPTV player for your own M3U playlists and
+Xtream Codes accounts) is now its own app and repo; it shows up here as a card too.
 
 ## Install
 
@@ -17,7 +18,7 @@ From the repo root, with the TV's IP:
 
 ```bash
 cd modules && ./gradlew assembleRelease && cd ..
-for m in weather prayer channels; do
+for m in weather prayer; do
   TV_HOST=192.168.1.50 tools/venv/bin/python -I tools/b64push.py modules/$m/build/outputs/apk/release/$m-release.apk /data/local/tmp/$m.apk
   TV_HOST=192.168.1.50 tools/venv/bin/python -I tools/tv.py "pm install -r /data/local/tmp/$m.apk; rm -f /data/local/tmp/$m.apk"
 done

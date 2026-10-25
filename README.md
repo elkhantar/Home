@@ -27,7 +27,7 @@
 - **Now playing**: while Spotify or another music app plays, a slim glass pill under the top buttons with the cover, song, artist and previous / play-pause / next, tinted in the cover's colour. Hold OK on it to open the app.
 - **Screensaver**: photos of the day with a slow zoom, the time, weather and today's prayer times top left, the song playing bottom left, and a thikr with its source bottom right, a new one every minute.
 - **Your choice**: prayer times on Home, prayer times on the screensaver and athkar can each be switched On or Off from the Settings button, no rebuild needed.
-- **Apps** in [`modules/`](modules/): **Weather** (7-day forecast, city search), **Prayer Times** (Morocco method, countdown to the next prayer) and **M3U Lite** (an IPTV player for your own M3U playlists and Xtream Codes accounts). They show up on the home screen as cards.
+- **Apps** in [`modules/`](modules/): **Weather** (7-day forecast, city search) and **Prayer Times** (Morocco method, countdown to the next prayer). They show up on the home screen as cards. For live TV, [**M3U Lite**](https://github.com/majnioui/m3u-lite), an IPTV player for your own M3U playlists and Xtream Codes accounts, is a separate app that shows up as a card too.
 
 ## Install
 
@@ -43,7 +43,7 @@ tools/disable.sh debloat.txt                     # debloat
 INPUT_KEY_SERVICE=1 launcher/build-and-install.sh   # the launcher, made the default home
 
 cd modules && ./gradlew assembleRelease && cd ..   # the apps
-for m in weather prayer channels; do
+for m in weather prayer; do
   tools/venv/bin/python -I tools/b64push.py modules/$m/build/outputs/apk/release/$m-release.apk /data/local/tmp/$m.apk
   tools/venv/bin/python -I tools/tv.py "pm install -r /data/local/tmp/$m.apk; rm -f /data/local/tmp/$m.apk"
 done
@@ -71,7 +71,7 @@ This re-enables every package in the list, gives Home back to the stock Google T
 No analytics and no accounts. The only requests the TV makes for these features go to:
 [Open-Meteo](https://open-meteo.com) for the weather (only the city's coordinates), Bing's photo of the day
 archive for the home screen and the screensaver, [Aladhan](https://aladhan.com) for prayer times,
-the playlists you add to M3U Lite and their streams, and AdGuard as the DNS resolver. Each can be
+and AdGuard as the DNS resolver. Each can be
 switched off in `config.xml` (or by not installing that app).
 
 ## Credits
