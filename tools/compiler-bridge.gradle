@@ -1,0 +1,25 @@
+// Build-only adapter for this workspace's Java ZipFS filesystem limitation; no TV interaction.
+allprojects { p ->
+    p.afterEvaluate {
+        if (p.plugins.hasPlugin('com.android.application')) {
+            p.tasks.withType(JavaCompile).configureEach { task ->
+                task.actions.clear()
+                task.doLast {
+                    def scratch = new File(p.rootProject.projectDir, '../local/compiler')
+                    scratch.mkdirs()
+                    def helper = new File(p.rootProject.projectDir, '../tools/CompileBridge.java')
+                    def javac = new File(System.getenv('JAVA_HOME'), 'bin/javac.exe')
+                    def java = new File(System.getenv('JAVA_HOME'), 'bin/java.exe')
+                    p.exec { commandLine javac, '-classpath', scratch, '-d', scratch, helper }
+                    def cp = new File(scratch, task.name + '-classpath.txt')
+                    def sources = new File(scratch, task.name + '-sources.txt')
+                    def output = task.destinationDirectory.get().asFile
+                    output.mkdirs()
+                    cp.setText((task.classpath.files + p.android.bootClasspath).collect { it.absolutePath }.join('\n'), 'UTF-8')
+                    sources.setText(task.source.files.collect { it.absolutePath }.join('\n'), 'UTF-8')
+                    p.exec { commandLine java, '-cp', scratch, 'CompileBridge', cp, sources, output }
+                }
+            }
+        }
+    }
+}

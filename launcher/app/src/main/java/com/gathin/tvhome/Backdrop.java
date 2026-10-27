@@ -7,6 +7,8 @@ import android.graphics.ColorMatrixColorFilter;
 import android.graphics.Paint;
 import android.view.View;
 
+import java.lang.ref.WeakReference;
+import java.util.Iterator;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -21,7 +23,8 @@ final class Backdrop {
 
     private Bitmap blurred;
     private int screenW, screenH;
-    private final List<View> users = new ArrayList<>();
+    private final List<WeakReference<View>> users = new ArrayList<>();
+    private final List<WeakReference<GlassDrawable.Renderer>> renderers = new ArrayList<>();
 
     Bitmap bitmap() {
         return blurred;
@@ -37,7 +40,19 @@ final class Backdrop {
 
     /** Views whose glass should be redrawn when the picture changes. */
     void register(View v) {
-        if (!users.contains(v)) users.add(v);
+        for (Iterator<WeakReference<View>> it = users.iterator(); it.hasNext();) {
+            View existing = it.next().get();
+            if (existing == null) it.remove();
+            else if (existing == v) return;
+        }
+        users.add(new WeakReference<>(v));
+    }
+
+    void register(GlassDrawable.Renderer renderer) {
+        for (Iterator<WeakReference<GlassDrawable.Renderer>> it = renderers.iterator(); it.hasNext();) {
+            if (it.next().get() == null) it.remove();
+        }
+        renderers.add(new WeakReference<>(renderer));
     }
 
     /** Main thread: takes a blurred copy made by blur(), and redraws the glass. */
@@ -45,7 +60,16 @@ final class Backdrop {
         blurred = blurredCopy;
         screenW = screenWidth;
         screenH = screenHeight;
-        for (View v : users) v.invalidate();
+        for (Iterator<WeakReference<GlassDrawable.Renderer>> it = renderers.iterator(); it.hasNext();) {
+            GlassDrawable.Renderer renderer = it.next().get();
+            if (renderer == null) it.remove();
+            else renderer.clear();
+        }
+        for (Iterator<WeakReference<View>> it = users.iterator(); it.hasNext();) {
+            View v = it.next().get();
+            if (v == null) it.remove();
+            else v.invalidate();
+        }
     }
 
     /** Any thread: a WIDTH-wide, blurred and more saturated copy of the picture, as it is shown centre-cropped. */

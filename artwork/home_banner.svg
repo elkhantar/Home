@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180" viewBox="0 0 320 180">
+<path d="M0,0H320V180H0Z" fill="#26383E" stroke="none" stroke-width="0" stroke-linejoin="round"/>
+<path d="M30,89L67,58L104,89L97,97L92,93V124H42V93L37,97Z" fill="#F1EEE5" stroke="none" stroke-width="0" stroke-linejoin="round"/>
+<path d="M82,99A15,15 0,1 1,52 99A15,15 0,1 1,82 99M73,99A6,6 0,1 1,61 99A6,6 0,1 1,73 99M56.39,88.39L62.76,94.76M71.24,94.76L77.61,88.39M71.24,103.24L77.61,109.61M56.39,109.61L62.76,103.24" fill="none" stroke="#26383E" stroke-width="2" stroke-linejoin="round"/>
+<text x="119" y="110" fill="#F1EEE5" font-family="Segoe UI" font-size="43" font-weight="500">Home</text>
+</svg>

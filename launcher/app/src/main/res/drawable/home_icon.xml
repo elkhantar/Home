@@ -1,0 +1,7 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+    <path android:fillColor="#26383E" android:pathData="M24,4H84Q104,4 104,24V84Q104,104 84,104H24Q4,104 4,84V24Q4,4 24,4Z" />
+    <path android:fillColor="#F1EEE5" android:pathData="M23,51L54,25L85,51L79,58L75,55V81H33V55L29,58Z" />
+    <!-- A round window echoing the remote's centre button and four directions. -->
+    <path android:fillColor="#00000000" android:strokeColor="#26383E" android:strokeWidth="1.7"
+        android:pathData="M67,60A13,13 0,1 1,41 60A13,13 0,1 1,67 60M59,60A5,5 0,1 1,49 60A5,5 0,1 1,59 60M44.81,50.81L50.46,56.46M57.54,56.46L63.19,50.81M57.54,63.54L63.19,69.19M44.81,69.19L50.46,63.54" />
+</vector>

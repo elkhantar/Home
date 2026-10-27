@@ -19,5 +19,5 @@
     <string name="not_available">此电视不支持该功能</string>
     <string name="cant_open">无法打开 %1$s</string>
     <string name="date_format">M月d日 EEEE</string>
-    <string name="dream_name">时钟</string>
+
 </resources>

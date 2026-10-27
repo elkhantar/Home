@@ -21,12 +21,14 @@ public class DockDecoration extends RecyclerView.ItemDecoration {
      */
     static final float PAD_X = 24, PAD_Y = 18;
 
+    boolean drawerOpen;
     private final int dockSize;
     private final float density;
     private final Paint band = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint edge = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final RectF rect = new RectF();
     private final Backdrop backdrop;
+    private final GlassDrawable.Renderer renderer;
     private final int[] loc = new int[2];
     /** The glass body's opacity, 0 to 255 (Config.dockOpacity). */
     private final int alpha;
@@ -36,6 +38,7 @@ public class DockDecoration extends RecyclerView.ItemDecoration {
         this.dockSize = dockSize;
         this.density = density;
         this.backdrop = backdrop;
+        this.renderer = new GlassDrawable.Renderer(backdrop);
         band.setColor(0xFF141416);
         edge.setStyle(Paint.Style.STROKE);
         edge.setStrokeWidth(density);
@@ -54,6 +57,7 @@ public class DockDecoration extends RecyclerView.ItemDecoration {
 
     @Override
     public void onDraw(@NonNull Canvas c, @NonNull RecyclerView parent, @NonNull RecyclerView.State state) {
+        if (drawerOpen) return;
         boolean any = false;
         for (int i = 0; i < parent.getChildCount(); i++) {
             View child = parent.getChildAt(i);
@@ -77,7 +81,7 @@ public class DockDecoration extends RecyclerView.ItemDecoration {
         float radius = 26 * density;
         if (backdrop.bitmap() != null) {
             parent.getLocationOnScreen(loc);
-            GlassDrawable.draw(c, rect, radius, backdrop, loc[0], loc[1], density, 0, GlassDrawable.DOCK_EDGE, alpha);
+            renderer.draw(c, rect, radius, loc[0], loc[1], density, 0, GlassDrawable.DOCK_EDGE, alpha);
             return;
         }
         c.drawRoundRect(rect, radius, radius, band);

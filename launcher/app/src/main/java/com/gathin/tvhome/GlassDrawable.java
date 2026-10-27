@@ -22,6 +22,7 @@ import android.view.View;
  * wallpaper) it falls back to the plain translucent pill the launcher always had.
  */
 final class GlassDrawable extends Drawable {
+    private final Renderer renderer;
     private final View owner;
     private final Backdrop backdrop;
     private final float radius, density;
@@ -35,6 +36,7 @@ final class GlassDrawable extends Drawable {
     }
 
     GlassDrawable(View owner, Backdrop backdrop, float radiusPx, float density, int veil) {
+        this.renderer = new Renderer(backdrop);
         this.veil = veil;
         this.owner = owner;
         this.backdrop = backdrop;
@@ -48,7 +50,7 @@ final class GlassDrawable extends Drawable {
         Rect b = getBounds();
         rect.set(b);
         owner.getLocationOnScreen(loc);
-        draw(c, rect, Math.min(radius, rect.height() / 2f), backdrop, loc[0] - b.left, loc[1] - b.top, density, veil);
+        renderer.draw(c, rect, Math.min(radius, rect.height() / 2f), loc[0] - b.left, loc[1] - b.top, density, veil, EDGE, 255);
     }
 
     /**
@@ -60,60 +62,70 @@ final class GlassDrawable extends Drawable {
     /** The dock band's edge before the glass: an even 1dp line, 12% white. */
     static final int DOCK_EDGE = 0x1FFFFFFF;
 
-    static void draw(Canvas c, RectF rect, float radius, Backdrop backdrop, float screenX, float screenY, float density) {
-        draw(c, rect, radius, backdrop, screenX, screenY, density, 0, EDGE);
-    }
+    /** Per-surface drawing state; never shared between independently positioned glass panels. */
+    static final class Renderer {
+        private final Backdrop backdrop;
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Matrix matrix = new Matrix();
+        private final RectF edge = new RectF();
+        private Shader body;
+        private BitmapShader photo;
+        private float top = Float.NaN, bottom = Float.NaN;
 
-    static void draw(Canvas c, RectF rect, float radius, Backdrop backdrop, float screenX, float screenY,
-                     float density, int veil) {
-        draw(c, rect, radius, backdrop, screenX, screenY, density, veil, EDGE);
-    }
-
-    static void draw(Canvas c, RectF rect, float radius, Backdrop backdrop, float screenX, float screenY,
-                     float density, int veil, int edgeColor) {
-        draw(c, rect, radius, backdrop, screenX, screenY, density, veil, edgeColor, 255);
-    }
-
-    /** @param alpha the glass body's opacity, 0 to 255: lower lets the sharp picture behind show through. */
-    static void draw(Canvas c, RectF rect, float radius, Backdrop backdrop, float screenX, float screenY,
-                     float density, int veil, int edgeColor, int alpha) {
-        // One fill for the body of the glass: the blurred photo (veil already baked in) and the sheen on
-        // its upper half, composed in a single shader so the GPU blends this area once, not four times.
-        Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
-        Shader sheen = new LinearGradient(0, rect.top, 0, rect.top + rect.height() * 0.6f,
-                0x26FFFFFF, 0x00FFFFFF, Shader.TileMode.CLAMP);
-        Shader body;
-        Bitmap bmp = backdrop.bitmap();
-        if (bmp != null && backdrop.screenWidth() > 0) {
-            BitmapShader photo = new BitmapShader(bmp, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP);
-            Matrix m = new Matrix();
-            m.setScale(backdrop.screenWidth() / (float) bmp.getWidth(), backdrop.screenHeight() / (float) bmp.getHeight());
-            m.postTranslate(-screenX, -screenY);
-            photo.setLocalMatrix(m);
-            body = new ComposeShader(photo, sheen, PorterDuff.Mode.SRC_OVER);
-            p.setFilterBitmap(true);
-        } else {
-            body = new ComposeShader(new LinearGradient(0, rect.top, 0, rect.bottom, 0x2EFFFFFF, 0x14FFFFFF,
-                    Shader.TileMode.CLAMP), sheen, PorterDuff.Mode.SRC_OVER);
+        Renderer(Backdrop backdrop) {
+            this.backdrop = backdrop;
+            backdrop.register(this);
         }
-        p.setShader(body);
-        p.setAlpha(alpha);
-        c.drawRoundRect(rect, radius, radius, p);
-        if (veil != 0 && bmp != null) {
-            p.setShader(null);
-            p.setColor(veil);
-            c.drawRoundRect(rect, radius, radius, p);
+
+        // Wallpaper changes (including stop) release cached shader/bitmap references immediately.
+        void clear() {
+            body = null;
+            photo = null;
+            paint.setShader(null);
+            top = bottom = Float.NaN;
         }
-        p.setAlpha(255);
-        // Edge: the same even line the pills and dock band had before the glass.
-        float sw = Math.max(1f, density);
-        RectF edge = new RectF(rect);
-        edge.inset(sw / 2f, sw / 2f);
-        p.setStyle(Paint.Style.STROKE);
-        p.setStrokeWidth(sw);
-        p.setShader(null);
-        p.setColor(edgeColor);
-        c.drawRoundRect(edge, radius, radius, p);
+
+        void draw(Canvas c, RectF rect, float radius, float screenX, float screenY,
+                  float density, int veil, int edgeColor, int alpha) {
+            Bitmap bmp = backdrop.bitmap();
+            if (body == null || top != rect.top || bottom != rect.bottom) {
+                top = rect.top;
+                bottom = rect.bottom;
+                Shader sheen = new LinearGradient(0, rect.top, 0, rect.top + rect.height() * 0.6f,
+                        0x26FFFFFF, 0x00FFFFFF, Shader.TileMode.CLAMP);
+                if (bmp != null && backdrop.screenWidth() > 0) {
+                    photo = new BitmapShader(bmp, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP);
+                    body = new ComposeShader(photo, sheen, PorterDuff.Mode.SRC_OVER);
+                } else {
+                    photo = null;
+                    body = new ComposeShader(new LinearGradient(0, rect.top, 0, rect.bottom,
+                            0x2EFFFFFF, 0x14FFFFFF, Shader.TileMode.CLAMP), sheen, PorterDuff.Mode.SRC_OVER);
+                }
+            }
+            if (photo != null) {
+                matrix.setScale(backdrop.screenWidth() / (float) bmp.getWidth(),
+                        backdrop.screenHeight() / (float) bmp.getHeight());
+                matrix.postTranslate(-screenX, -screenY);
+                photo.setLocalMatrix(matrix);
+            }
+            paint.setStyle(Paint.Style.FILL);
+            paint.setFilterBitmap(photo != null);
+            paint.setShader(body);
+            paint.setAlpha(alpha);
+            c.drawRoundRect(rect, radius, radius, paint);
+            if (veil != 0 && bmp != null) {
+                paint.setShader(null);
+                paint.setColor(veil);
+                c.drawRoundRect(rect, radius, radius, paint);
+            }
+            paint.setShader(null);
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(Math.max(1f, density));
+            paint.setColor(edgeColor);
+            edge.set(rect);
+            edge.inset(Math.max(1f, density) / 2f, Math.max(1f, density) / 2f);
+            c.drawRoundRect(edge, radius, radius, paint);
+        }
     }
 
     @Override

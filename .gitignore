@@ -17,3 +17,17 @@ modules/.gradle/
 modules/build/
 modules/*/build/
 modules/local.properties
+local/
+
+# Private publication and wallpaper working data
+.unsplash-access-key
+.env
+.env.*
+*.jks
+*.keystore
+*.p12
+*.pem
+wallpaper-metadata/
+wallpaper-source/
+.toolchain/
+__pycache__/

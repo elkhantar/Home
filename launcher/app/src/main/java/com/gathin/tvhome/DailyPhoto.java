@@ -3,210 +3,175 @@ package com.gathin.tvhome;
 import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.os.SystemClock;
+import android.util.AtomicFile;
 import android.util.Log;
-
-import org.json.JSONArray;
-import org.json.JSONObject;
-
-import java.io.ByteArrayOutputStream;
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.FileOutputStream;
-import java.io.InputStream;
-import java.net.HttpURLConnection;
-import java.net.URL;
+import org.json.*;
+import java.io.*;
 import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.Date;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Locale;
-import java.util.Map;
+import java.util.*;
+import java.util.function.LongSupplier;
+import java.util.function.BooleanSupplier;
 
-/**
- * Bing's photos of the day, shared by the home screen (a different one every few hours) and the Clock
- * screensaver (all of them in turn). The list comes from five English-language regions, 15 days back each,
- * with the photos they share counted once: about 20 to 25 photos instead of one region's 8. It is fetched
- * at most once a day and kept, with the photos, in the cache directory, so both still have pictures
- * offline. All methods block: call them off the main thread.
- */
+/** Bing Spain daily archive. Cached images are usable before any network refresh completes. */
 final class DailyPhoto {
-    private static final String TAG = "TvHome.Photo";
-    /** English captions; regions often swap in a photo of their own. The first is preferred for shared ones. */
-    private static final String[] REGIONS = {"en-US", "en-GB", "en-AU", "en-IN", "en-CA"};
-    /** Bing keeps 15 days: idx 0 gives days 0 to 7 and idx 7 days 7 to 14; further back repeats them. */
-    private static final int[] FROM = {0, 7};
-    private static final String LIST = "https://www.bing.com/HPImageArchive.aspx?format=js&n=8";
-    private static final int MAX_CACHED = 24;
+    private static final String LIST = "https://www.bing.com/HPImageArchive.aspx?format=js&n=8&idx=0&mkt=es-ES";
+    private static final long RETRY_MS = 30 * 60_000L;
+    private static final long CACHE_BYTES = 24L * 1024 * 1024;
+    private static final long FREE_RESERVE = 64L * 1024 * 1024;
+    private static final int MAX_CACHED = 12;
+    private static final ArchiveRetry retry = new ArchiveRetry(RETRY_MS);
+    private static final Object metadataLock = new Object();
+    private static volatile String lastGoodKey;
 
     static final class Photo {
-        final String url, key;
-        /** "Grand Canal in Venice, Italy" */
-        final String title;
-        /** "© Juan Romero/Cavan Images", or empty */
-        final String credit;
-
+        final String url, key, title, credit, sha256;
+        final File localFile;
         Photo(String url, String key, String title, String credit) {
-            this.url = url;
-            this.key = key;
-            this.title = title;
-            this.credit = credit;
+            this.url=url; this.key=key; this.title=title; this.credit=credit;this.localFile=null;this.sha256=null;
         }
-
-        /** Both, as one line. */
-        String caption() {
-            return credit.isEmpty() ? title : title + " (" + credit + ")";
+        Photo(File file,String hash,String key,String title,String credit){
+            this.url=null;this.localFile=file;this.sha256=hash;this.key=key;this.title=title;this.credit=credit;
         }
     }
-
-    private DailyPhoto() {
+    private DailyPhoto() {}
+    static File dir(Context c) {
+        File folder=new File(c.getCacheDir(), "wallpapers"); folder.mkdirs(); return folder;
     }
-
-    static File dir(Context ctx) {
-        File dir = new File(ctx.getCacheDir(), "dream");
-        if (!dir.isDirectory()) dir.mkdirs();
-        return dir;
+    static List<Photo> list(Context context,BooleanSupplier cancelled) {
+        Context app=context.getApplicationContext();
+        File file=new File(dir(app), "photos.json");
+        JSONObject saved=readJson(file);
+        List<Photo> old=parse(saved);
+        String today=new SimpleDateFormat("yyyy-MM-dd", Locale.ROOT).format(new Date());
+        if (saved != null && today.equals(saved.optString("day"))) return old;
+        long now=SystemClock.elapsedRealtime();
+        if (!retry.begin(now)) return old;
+        if (!old.isEmpty()) {
+            new Thread(() -> {
+                refresh(app,today,()->false);
+            }, "BingRefresh").start();
+            return old;
+        }
+        return refresh(app,today,cancelled);
     }
-
-    /**
-     * Today's list, newest first: the one saved today if there is one, else fetched from Bing (and saved),
-     * else the last one saved. Empty only offline on a TV that never had a list.
-     */
-    static List<Photo> list(Context ctx) {
-        File saved = new File(dir(ctx), "photos.json");
-        String today = new SimpleDateFormat("yyyy-MM-dd", Locale.ROOT).format(new Date());
-        JSONObject cached = readJson(saved);
-        if (cached != null && today.equals(cached.optString("day"))) return parse(cached);
-
-        // Every region, both pages; a photo the regions share is kept once, from the first that has it.
-        Map<String, JSONObject> byName = new LinkedHashMap<>();
-        for (String region : REGIONS) {
-            for (int from : FROM) {
+    private static List<Photo> refresh(Context c, String today,BooleanSupplier cancelled) {
+        try {
+            return retry.complete(SystemClock::elapsedRealtime,cancelled,()->{
+            JSONObject reply=new JSONObject(new String(SafeHttp.fetch(LIST,SafeHttp.JSON_LIMIT),StandardCharsets.UTF_8));
+            JSONObject saved=new JSONObject().put("day",today).put("images",reply.getJSONArray("images"));
+            List<Photo> photos=parse(saved);
+            if (photos.isEmpty()) throw new IOException("Empty archive");
+            if (cancelled.getAsBoolean()) throw new InterruptedIOException("Lifecycle cancellation");
+            synchronized (metadataLock) {
+                AtomicFile atomic=new AtomicFile(new File(dir(c),"photos.json"));
+                FileOutputStream out=null;
                 try {
-                    JSONArray images = new JSONObject(new String(fetch(LIST + "&mkt=" + region + "&idx=" + from),
-                            StandardCharsets.UTF_8)).getJSONArray("images");
-                    for (int i = 0; i < images.length(); i++) {
-                        JSONObject im = images.getJSONObject(i);
-                        String name = name(im.getString("urlbase"));
-                        if (!byName.containsKey(name)) byName.put(name, im);
-                    }
-                } catch (Exception e) {
-                    Log.w(TAG, "list " + region + "/" + from + ": " + e);
-                }
+                    out=atomic.startWrite(); out.write(saved.toString().getBytes(StandardCharsets.UTF_8)); atomic.finishWrite(out);
+                } catch (IOException e) { if (out != null) atomic.failWrite(out); throw e; }
             }
-        }
-        if (byName.isEmpty()) return cached != null ? parse(cached) : new ArrayList<>();
-        List<JSONObject> images = new ArrayList<>(byName.values());
-        Collections.sort(images, (a, b) -> b.optString("startdate").compareTo(a.optString("startdate")));
-        try {
-            JSONObject out = new JSONObject().put("day", today).put("images", new JSONArray(images));
-            // Written aside and renamed: Home and the screensaver may both be saving it.
-            File tmp = new File(dir(ctx), "photos.json." + android.os.Process.myTid());
-            try (FileOutputStream f = new FileOutputStream(tmp)) {
-                f.write(out.toString().getBytes(StandardCharsets.UTF_8));
-            }
-            if (!tmp.renameTo(saved)) tmp.delete();
-            return parse(out);
+            return photos;
+            });
         } catch (Exception e) {
-            Log.w(TAG, "list save: " + e);
-            return new ArrayList<>();
+            Log.w("PersonalTV.Photo","Archive unavailable; keeping cached images");
+            return parse(readJson(new File(dir(c),"photos.json")));
         }
     }
-
-    /** "/th?id=OHR.BrownSloth_EN-US123" -> "BrownSloth": the same photo has a different id per region. */
-    private static String name(String urlbase) {
-        String n = urlbase.substring(urlbase.lastIndexOf('.') + 1);
-        int us = n.indexOf('_');
-        return us > 0 ? n.substring(0, us) : n;
-    }
-
     private static JSONObject readJson(File f) {
-        if (!f.isFile()) return null;
-        try {
-            return new JSONObject(new String(readAll(new FileInputStream(f)), StandardCharsets.UTF_8));
-        } catch (Exception e) {
-            return null;
+        synchronized (metadataLock) {
+        try (InputStream in=new AtomicFile(f).openRead()) {
+            return new JSONObject(new String(SafeHttp.read(in,SafeHttp.JSON_LIMIT,Long.MAX_VALUE),StandardCharsets.UTF_8));
+        } catch (Exception e) { return null; }
         }
     }
-
-    private static List<Photo> parse(JSONObject list) {
-        List<Photo> out = new ArrayList<>();
-        JSONArray images = list.optJSONArray("images");
-        if (images == null) return out;
-        for (int i = 0; i < images.length(); i++) {
-            JSONObject im = images.optJSONObject(i);
-            if (im == null) continue;
-            String base = im.optString("urlbase");
-            if (base.isEmpty()) continue;
-            String copyright = im.optString("copyright", "");
-            String title = copyright, credit = "";
-            int paren = copyright.lastIndexOf(" (");
-            if (paren > 0 && copyright.endsWith(")")) {
-                title = copyright.substring(0, paren);
-                credit = copyright.substring(paren + 2, copyright.length() - 1);
-            }
-            out.add(new Photo("https://www.bing.com" + base + "_1920x1080.jpg",
-                    base.replaceAll("[^A-Za-z0-9._-]", "_"), title, credit));
+    private static List<Photo> parse(JSONObject saved) {
+        List<Photo> photos=new ArrayList<>();
+        JSONArray images=saved == null ? null : saved.optJSONArray("images");
+        for (int i=0; images != null && i<Math.min(images.length(),16); i++) {
+            JSONObject image=images.optJSONObject(i);
+            if (image == null) continue;
+            String base=image.optString("urlbase");
+            if (!base.startsWith("/th?id=OHR.") || base.length()>512) continue;
+            String title=image.optString("copyright", "Bing photo of the day"), credit="";
+            if (title.length()>512) title=title.substring(0,512);
+            int split=title.lastIndexOf(" (");
+            if (split>0 && title.endsWith(")")) { credit=title.substring(split+2,title.length()-1); title=title.substring(0,split); }
+            photos.add(new Photo("https://www.bing.com"+base+"_1920x1080.jpg",
+                    base.replaceAll("[^A-Za-z0-9._-]","_"),title,credit));
         }
-        return out;
+        return photos;
+    }
+    /** Network and decode run only on the caller's worker, never on the UI thread. */
+    static boolean isCached(Context c, Photo p) {
+        if(p.localFile!=null)return p.localFile.isFile();
+        File file=new File(dir(c),p.key+".jpg");
+        return file.isFile() && file.length()>0 && file.length()<=SafeHttp.IMAGE_LIMIT;
     }
 
-    /** The photo from the cache, else downloaded and cached, decoded for this screen width; null on failure. */
-    static Bitmap load(Context ctx, Photo p, int screenWidth) {
-        File file = new File(dir(ctx), p.key + ".jpg");
+    static synchronized Bitmap load(Context c, Photo p, int screenWidth) {
+        if(p.localFile!=null)return LocalWallpapers.load(p,screenWidth);
+        File folder=dir(c), file=new File(folder,p.key+".jpg");
         try {
             if (!file.isFile()) {
-                byte[] data = fetch(p.url);
-                try (FileOutputStream out = new FileOutputStream(file)) {
-                    out.write(data);
-                }
-                prune(ctx);
+                if (!prepareDownload(folder,folder::getUsableSpace)) return null;
+                byte[] data=SafeHttp.fetch(p.url,SafeHttp.IMAGE_LIMIT);
+                BitmapFactory.Options bounds=new BitmapFactory.Options(); bounds.inJustDecodeBounds=true;
+                BitmapFactory.decodeByteArray(data,0,data.length,bounds);
+                if (!validDimensions(bounds.outWidth,bounds.outHeight)) return null;
+                File temp=new File(folder,p.key+".tmp");
+                try {
+                    try (OutputStream out=new FileOutputStream(temp)) { out.write(data); }
+                    if (!temp.renameTo(file)) throw new IOException("Cannot save wallpaper");
+                } finally { temp.delete(); }
             }
             file.setLastModified(System.currentTimeMillis());
-            BitmapFactory.Options o = new BitmapFactory.Options();
-            o.inJustDecodeBounds = true;
-            BitmapFactory.decodeFile(file.getPath(), o);
-            o.inJustDecodeBounds = false;
-            o.inSampleSize = 1;
-            while (o.outWidth / (o.inSampleSize * 2) >= screenWidth) o.inSampleSize *= 2;
-            o.inPreferredConfig = Bitmap.Config.RGB_565;   // half the memory; fine for photos on a 1 GB TV
-            o.inMutable = true;                            // so the home screen can bake its scrim into it
-            return BitmapFactory.decodeFile(file.getPath(), o);
-        } catch (Exception | OutOfMemoryError e) {
-            Log.w(TAG, "photo: " + e);
-            file.delete();
-            return null;
+            BitmapFactory.Options o=new BitmapFactory.Options(); o.inJustDecodeBounds=true;
+            BitmapFactory.decodeFile(file.getPath(),o);
+            if (!validDimensions(o.outWidth,o.outHeight) || file.length()>SafeHttp.IMAGE_LIMIT) { file.delete(); return null; }
+            o.inJustDecodeBounds=false; o.inSampleSize=1;
+            int target=Math.max(320,Math.min(screenWidth,1920));
+            while (o.outWidth/o.inSampleSize>target || o.outHeight/o.inSampleSize>1080) o.inSampleSize*=2;
+            o.inPreferredConfig=Bitmap.Config.RGB_565; o.inMutable=true;
+            Bitmap bitmap=BitmapFactory.decodeFile(file.getPath(),o);
+            if (bitmap == null) file.delete();
+            else lastGoodKey=p.key;
+            prune(folder,file);
+            return bitmap;
+        } catch (OutOfMemoryError e) {
+            Log.w("PersonalTV.Photo","Decode memory unavailable; retaining cached photo"); return null;
+        } catch (Exception e) {
+            file.delete(); Log.w("PersonalTV.Photo","Wallpaper unavailable; keeping previous picture"); return null;
         }
     }
-
-    /** Keeps the newest MAX_CACHED photos. */
-    private static void prune(Context ctx) {
-        File[] files = dir(ctx).listFiles((d, n) -> n.endsWith(".jpg"));
-        if (files == null || files.length <= MAX_CACHED) return;
-        Arrays.sort(files, (a, b) -> Long.compare(b.lastModified(), a.lastModified()));
-        for (int i = MAX_CACHED; i < files.length; i++) files[i].delete();
+    static boolean validDimensions(int w,int h) {
+        return w>=320 && h>=180 && w<=8192 && h<=8192 && (long)w*h<=16_777_216L;
     }
-
-    static byte[] fetch(String url) throws Exception {
-        HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
-        c.setConnectTimeout(10000);
-        c.setReadTimeout(15000);
-        try (InputStream in = c.getInputStream()) {
-            return readAll(in);
-        } finally {
-            c.disconnect();
+    static void prune(File folder,File keep) {
+        prune(folder,keep,folder::getUsableSpace,FREE_RESERVE);
+    }
+    static boolean prepareDownload(File folder,LongSupplier space) {
+        prune(folder,null,space,FREE_RESERVE+SafeHttp.IMAGE_LIMIT);
+        return space.getAsLong()>=FREE_RESERVE+SafeHttp.IMAGE_LIMIT;
+    }
+    private static void prune(File folder,File keep,LongSupplier space,long reserve) {
+        // load() is serialized, so no image download can own a .tmp file at this point.
+        File[] abandoned=folder.listFiles((d,n)->n.endsWith(".tmp"));
+        if (abandoned!=null) for(File file:abandoned) file.delete();
+        File[] files=folder.listFiles((d,n)->n.endsWith(".jpg"));
+        if (files == null) return;
+        Arrays.sort(files,(a,b)->Long.compare(b.lastModified(),a.lastModified()));
+        if (keep==null && lastGoodKey!=null) {
+            File previous=new File(folder,lastGoodKey+".jpg");
+            if (previous.isFile()) keep=previous;
         }
-    }
-
-    private static byte[] readAll(InputStream in) throws Exception {
-        try (InputStream src = in) {
-            ByteArrayOutputStream out = new ByteArrayOutputStream();
-            byte[] buf = new byte[16384];
-            for (int n; (n = src.read(buf)) > 0; ) out.write(buf, 0, n);
-            return out.toByteArray();
+        if (keep==null && files.length>0) keep=files[0];
+        long bytes=0; int count=0;
+        if (keep != null && keep.isFile()) {bytes=keep.length();count=1;}
+        for (File file:files) {
+            if (file.equals(keep)) continue;
+            if (count>=MAX_CACHED || bytes+file.length()>CACHE_BYTES || space.getAsLong()<reserve) file.delete();
+            else {bytes+=file.length();count++;}
         }
     }
 }

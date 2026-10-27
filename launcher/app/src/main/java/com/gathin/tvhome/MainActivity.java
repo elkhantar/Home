@@ -14,7 +14,6 @@ import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
-import android.graphics.RadialGradient;
 import android.graphics.Rect;
 import android.graphics.Shader;
 import android.graphics.drawable.BitmapDrawable;
@@ -98,25 +97,32 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     private RecyclerView grid;
     private FrameLayout root;
     private GlassView glass;
-    private View ambient;
+    private ContinueWatching continueWatching;
+    private View drawerSurface;
+    private boolean drawerOpen;
+    private DockDecoration dockDecoration;
     private TextView heroName;
-    private int ambientColor = -1;
     private boolean heroShown;
     private TextView greeting;
     private TextView reorderHint;
     private View btnInputs;
-    /** Null when now_playing is off. */
-    private NowPlayingCard nowCard;
     /** The blurred picture behind the glass (photo of the day or a theme's wallpaper). */
     private final Backdrop backdrop = new Backdrop();
     private boolean homePhotoOn;
-    /** The three-hour slot (yyyy-MM-dd/h) the home photo is for; null until one is shown. */
+    /** Wallpaper rotation slot; null until a photo is successfully shown. */
     private String photoSlot;
-    /** Hours a home photo stays before the next one. */
-    private static final int PHOTO_HOURS = 3;
-    /** Null when now_playing is off. */
-    private NowPlaying nowPlaying;
-    private NowPlaying.Track track;
+    private volatile boolean active;
+    private volatile int photoGeneration;
+    private java.util.concurrent.Future<?> photoTask;
+    private final java.util.concurrent.ThreadPoolExecutor photoWorker = new java.util.concurrent.ThreadPoolExecutor(
+            0, 1, 15, java.util.concurrent.TimeUnit.SECONDS, new java.util.concurrent.SynchronousQueue<>());
+    private int weatherGeneration;
+    private long weatherSuccessAt;
+    private java.util.concurrent.Future<?> weatherTask;
+    private final java.util.concurrent.ThreadPoolExecutor weatherWorker = new java.util.concurrent.ThreadPoolExecutor(
+            0, 1, 15, java.util.concurrent.TimeUnit.SECONDS, new java.util.concurrent.SynchronousQueue<>());
+    /** Five minutes between wallpaper changes while Home is visible. */
+    private static final long PHOTO_INTERVAL_MS = 5 * 60_000L;
     private TextView btnWifi;
     private TextView shamsiDate;
     private TextView weather;
@@ -125,18 +131,6 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     /** When the weather was last fetched (elapsedRealtime), successfully or not. */
     private long weatherAt = -WEATHER_MS;
     private boolean weatherLoading;
-    /** Prayer pill under the clock (home_prayer); switched from the Settings menu. */
-    private boolean homePrayer;
-    private String prayerLat, prayerLon;
-    private int prayerMethod;
-    private View prayerPill;
-    private TextView prayerName, prayerTime, prayerLeft;
-    private ImageView prayerIcon;
-    /** The last times loaded; kept past midnight until the new day's arrive, a minute out at most. */
-    private Prayer.Day prayerDay;
-    /** When the times were last requested (elapsedRealtime). */
-    private long prayerAt = -5 * MINUTE_MS;
-    private boolean prayerLoading;
     private boolean shamsi;
     private String vpnApp;
     private SpringAnimation springX, springY;
@@ -236,7 +230,6 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             updateGreeting();
             updateWifiLabel();
             updateWeather();
-            updatePrayer();
             if (homePhotoOn) loadHomePhoto();   // a new photo when the next slot starts
             handler.postDelayed(this, MINUTE_MS);
         }
@@ -263,7 +256,14 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         if (cfg.wallpaper != null) showWallpaper(cfg.wallpaper);
         homePhotoOn = cfg.homePhoto && cfg.wallpaper == null;
         glass = findViewById(R.id.glass);
-        ambient = findViewById(R.id.ambient);
+        continueWatching = new ContinueWatching(this, root, (panel, width) -> {
+            if (openPopup != null) openPopup.dismiss();
+            PopupWindow p = glassPopup(panel, width);
+            openPopup = null; // ContinueWatching owns and closes its popup independently.
+            return p;
+        });
+        drawerSurface = findViewById(R.id.drawerSurface);
+        drawerSurface.setBackground(new GlassDrawable(drawerSurface, backdrop, 26 * density, density, 0x88000000));
         heroName = findViewById(R.id.heroName);
         reorderHint = findViewById(R.id.reorderHint);
         greeting = findViewById(R.id.greeting);
@@ -281,24 +281,13 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         hiddenApps = new HashSet<>(cfg.hiddenApps);
         weather = findViewById(R.id.weather);
         weatherPlace = cfg.weatherPlace;
-        if (!cfg.weatherLatitude.isEmpty() && !cfg.weatherLongitude.isEmpty()) {
-            weatherUrl = "https://api.open-meteo.com/v1/forecast?latitude=" + cfg.weatherLatitude
-                    + "&longitude=" + cfg.weatherLongitude + "&current=temperature_2m,weather_code,is_day&timezone=auto";
-        }
-        prayerPill = findViewById(R.id.prayerPill);
-        prayerIcon = findViewById(R.id.prayerIcon);
-        prayerName = findViewById(R.id.prayerName);
-        prayerTime = findViewById(R.id.prayerTime);
-        prayerLeft = findViewById(R.id.prayerLeft);
-        prayerPill.setBackground(new GlassDrawable(prayerPill, backdrop, 19 * density, density));
-        // Prayer times use the weather coordinates; without them there is nothing to show.
-        if (!cfg.weatherLatitude.isEmpty() && !cfg.weatherLongitude.isEmpty()) {
-            prayerLat = cfg.weatherLatitude;
-            prayerLon = cfg.weatherLongitude;
-        }
-        prayerMethod = cfg.prayerMethod;
-        homePrayer = cfg.homePrayer && prayerLat != null;
-        dockApps = DockEditor.loadDock(this, cfg.dockApps, COLUMNS);
+        try {
+            double lat=Double.parseDouble(cfg.weatherLatitude), lon=Double.parseDouble(cfg.weatherLongitude);
+            if (Double.isFinite(lat) && Double.isFinite(lon) && Math.abs(lat)<=90 && Math.abs(lon)<=180)
+                weatherUrl=String.format(Locale.ROOT,
+                        "https://api.open-meteo.com/v1/forecast?latitude=%.2f&longitude=%.2f&current=temperature_2m,weather_code,is_day&timezone=auto",lat,lon);
+        } catch (NumberFormatException ignored) { }
+        dockApps = DockEditor.loadDock(this, cfg.dockApps, COLUMNS - 1);
         appOrder = DockEditor.loadAppOrder(this, dockApps);
 
         grid = findViewById(R.id.grid);
@@ -321,9 +310,28 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             @Override
             public boolean requestChildRectangleOnScreen(@NonNull RecyclerView parent, @NonNull View child,
                                                          @NonNull Rect rect, boolean immediate, boolean focusedChildVisible) {
-                int top = getPaddingTop(), bottom = getHeight() - getPaddingBottom();
-                int childTop = child.getTop() + rect.top - child.getScrollY();
-                int childBottom = childTop + rect.height();
+                // Framework focus requests describe only the focusable banner. Include its
+                // sibling name too, so a later automatic request cannot clip the label.
+                boolean drawer = parent.getChildAdapterPosition(child) >= COLUMNS;
+                int position = parent.getChildAdapterPosition(child);
+                View dock = findViewByPosition(0);
+                if (drawer && position < COLUMNS + GRID_COLUMNS && dock != null) {
+                    // Opening the drawer brings its first row to the pane's top in one
+                    // glide, instead of only revealing the newly focused second row.
+                    int dy = getDecoratedTop(dock) - Math.round(16 * density);
+                    if (dy == 0) return false;
+                    if (immediate) parent.scrollBy(0, dy);
+                    else glide(dy);
+                    return true;
+                }
+                // The large top padding parks the dock near the bottom initially; it is
+                // not a forbidden area when scrolling the taller drawer rows into view.
+                int top = drawer ? 0 : getPaddingTop();
+                int bottom = getHeight() - getPaddingBottom();
+                int rectTop = drawer ? Math.min(rect.top, -(int) (12 * density)) : rect.top;
+                int rectBottom = drawer ? Math.max(rect.bottom, child.getHeight() + (int) (6 * density)) : rect.bottom;
+                int childTop = child.getTop() + rectTop - child.getScrollY();
+                int childBottom = child.getTop() + rectBottom - child.getScrollY();
                 int offTop = Math.min(0, childTop - top), offBottom = Math.max(0, childBottom - bottom);
                 int dy = offTop != 0 ? offTop : Math.min(childTop - top, offBottom);
                 if (dy == 0) return false;
@@ -341,7 +349,8 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         grid.setLayoutManager(glm);
         grid.setHasFixedSize(true);
         grid.setItemAnimator(null);
-        grid.addItemDecoration(new DockDecoration(COLUMNS, density, backdrop, cfg.dockOpacity));
+        dockDecoration = new DockDecoration(COLUMNS, density, backdrop, cfg.dockOpacity);
+        grid.addItemDecoration(dockDecoration);
         backdrop.register(grid);
         grid.setLayoutAnimation(new LayoutAnimationController(
                 AnimationUtils.loadAnimation(this, R.anim.tile_enter), 0.06f));
@@ -424,24 +433,6 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
                         .scaleX(focused ? 1.08f : 1f).scaleY(focused ? 1.08f : 1f).setDuration(180).start());
             }
         }
-        if (cfg.nowPlaying) {
-            nowCard = new NowPlayingCard(this, backdrop, getResources().getFont(R.font.outfit),
-                    new NowPlayingCard.Exits() {
-                        @Override
-                        public void up() {
-                            btnSettings.requestFocus();
-                        }
-
-                        @Override
-                        public void down() {
-                            focusTile(lastFocused % COLUMNS);
-                        }
-                    });
-            FrameLayout.LayoutParams nlp = new FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT);
-            ((ViewGroup) findViewById(R.id.nowSlot)).addView(nowCard, nlp);
-            nowPlaying = new NowPlaying(this, handler, this::showNowPlaying);
-        }
         btnSettings.setOnClickListener(v -> showSettingsMenu());
         btnSettings.setOnLongClickListener(v -> {
             if (!moduleCards) return false;   // off: a long press does nothing, as before the feature
@@ -455,10 +446,8 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             if (event.getAction() != KeyEvent.ACTION_DOWN) return false;
             if (keyCode == KeyEvent.KEYCODE_DPAD_UP) return true;
             if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN) {
-                // The now playing card when it shows, else back to the dock tile Up came from, not
-                // wherever the focus finder lands.
-                if (cardShowing()) nowCard.defaultButton().requestFocus();
-                else focusTile(lastFocused % COLUMNS);
+                // Return to the dock tile that led to the top bar.
+                focusTile(lastFocused % COLUMNS);
                 return true;
             }
             if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT) {
@@ -520,12 +509,14 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
      */
     private void showWallpaper(File file) {
         try {
+            if (file.length()>SafeHttp.IMAGE_LIMIT) return;
             android.util.DisplayMetrics dm = getResources().getDisplayMetrics();
             android.graphics.BitmapFactory.Options opts = new android.graphics.BitmapFactory.Options();
             opts.inJustDecodeBounds = true;
             android.graphics.BitmapFactory.decodeFile(file.getPath(), opts);
+            if (!DailyPhoto.validDimensions(opts.outWidth,opts.outHeight)) return;
             int sample = 1;
-            while (opts.outWidth / (sample * 2) >= dm.widthPixels && opts.outHeight / (sample * 2) >= dm.heightPixels) sample *= 2;
+            while (opts.outWidth/sample>Math.min(dm.widthPixels,1920) || opts.outHeight/sample>1080) sample *= 2;
             opts.inJustDecodeBounds = false;
             opts.inSampleSize = sample;
             opts.inPreferredConfig = android.graphics.Bitmap.Config.RGB_565;   // no alpha needed, half the memory
@@ -550,6 +541,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     @Override
     protected void onResume() {
         super.onResume();
+        active = true;
         promptsPaused = false;
         switch (tileRefresh.onResume(packagesChangedSinceRebuild())) {
             case REBUILD:
@@ -568,10 +560,8 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         updateGreeting();
         updateWifiLabel();
         updateWeather();
-        updatePrayer();
         updateInputsButton();
         handler.postDelayed(minuteTick, MINUTE_MS);
-        if (nowPlaying != null) nowPlaying.start();
         if (homePhotoOn) loadHomePhoto();
     }
 
@@ -595,7 +585,6 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             glass.setAlpha(0f);
             heroShown = false;
             heroName.setAlpha(0f);
-            ambient.setAlpha(0f);
         }
         if (rebuild) {
             reloadTiles();
@@ -665,10 +654,17 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     @Override
     protected void onPause() {
         super.onPause();
+        active = false;
+        if (continueWatching != null) continueWatching.close();
+        photoGeneration++;
+        weatherGeneration++;
+        if (photoTask != null) photoTask.cancel(true);
+        if (weatherTask != null) weatherTask.cancel(true);
+        if (weatherLoading) weatherAt = -WEATHER_MS;
+        weatherLoading = false;
+        photoSlot = null;
         endDockEdit();
         handler.removeCallbacks(minuteTick);
-        if (nowPlaying != null) nowPlaying.stop();
-        if (nowCard != null) nowCard.stop();
         // Nothing of ours stays on screen over another app; an undecided prompt simply returns next time.
         if (cardPrompt != null) cardPrompt.dismiss();
         if (openPopup != null) openPopup.dismiss();
@@ -678,6 +674,12 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     protected void onStop() {
         super.onStop();
         tileRefresh.onStop();
+        if (homePhotoOn) {
+            ((ImageView)findViewById(R.id.homePhoto)).setImageDrawable(null);
+            backdrop.set(null, 1920, 1080);
+            root.setBackgroundColor(Color.BLACK);
+        }
+        photoSlot = null;
     }
 
     @Override
@@ -688,6 +690,9 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
 
     @Override
     protected void onDestroy() {
+        if (continueWatching != null) continueWatching.destroy();
+        photoWorker.shutdownNow();
+        weatherWorker.shutdownNow();
         super.onDestroy();
         unregisterReceiver(packageReceiver);
         ConnectivityManager cm = getSystemService(ConnectivityManager.class);
@@ -725,6 +730,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
 
     @Override
     public void onTileFocused(int position, View card) {
+        setDrawerOpen(position >= COLUMNS);
         lastFocused = position;
         lastFocusedKey = adapter.keyAt(position);
         // Tile rect in root coordinates, using layout positions (ignores the scale animation).
@@ -788,7 +794,6 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
 
     private void showHero(int position, float dockTopInRoot) {
         String label = adapter.labelAt(position);
-        int color = adapter.ambientColorAt(position);
         float y = dockTopInRoot - DockDecoration.PAD_Y * density - 26 * density - heroName.getHeight();
         boolean changed = !label.contentEquals(heroName.getText());
 
@@ -799,8 +804,6 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             heroName.animate().alpha(1f).setDuration(260).start();
             TextView caption = findViewById(R.id.photoCaption);
             if (caption.length() > 0) caption.animate().alpha(1f).setDuration(600).start();
-            setAmbient(color);
-            ambient.animate().alpha(1f).setDuration(600).start();
             heroShown = true;
         } else if (changed) {
             heroName.animate().alpha(0f).translationX(-12 * density).setDuration(120).withEndAction(() -> {
@@ -809,82 +812,16 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
                 heroName.setTranslationX(12 * density);
                 heroName.animate().alpha(1f).translationX(0f).setDuration(200).start();
             }).start();
-            if (color != ambientColor) setAmbient(color);   // cross-fades, see setAmbient
         } else {
             heroName.setY(y);
         }
     }
 
-    /**
-     * The glow used to be a full-screen radial GradientDrawable. On Android 10 that drawable is
-     * drawn on the CPU, so fading it for half a second redrew 1920×1080 every frame and the
-     * highlight looked like it was running at a few frames per second. A small bitmap stretched
-     * over the screen is one texture; changing apps only uploads it once.
-     */
-    private void setAmbient(int color) {
-        if (color == ambientColor && ambient.getBackground() != null) return;
-        ambientColor = color;
-        int c = color & 0x00FFFFFF;
-        int w = 480;
-        int h = 270;
-        Bitmap bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
-        Canvas canvas = new Canvas(bmp);
-        Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        if (backdrop.bitmap() != null) {
-            // Over a photo: an aurora in the app's colours. Its own colour low on the left, a warmer
-            // shift to the right and a cooler one across the top, each a soft blob, so the picture
-            // takes on the app's tint instead of being washed over.
-            aurora(canvas, paint, w * 0.22f, h * 0.78f, w * 0.60f, color, 0f, 0x38);
-            aurora(canvas, paint, w * 0.80f, h * 0.62f, w * 0.52f, color, 28f, 0x2B);
-            aurora(canvas, paint, w * 0.50f, h * 0.08f, w * 0.64f, color, -32f, 0x22);
-        } else {
-            paint.setShader(new RadialGradient(
-                    w * 0.32f, h * 0.42f, w * 0.62f,
-                    new int[]{0x5C000000 | c, 0x26000000 | c, 0x00000000 | c},
-                    new float[]{0f, 0.45f, 1f},
-                    Shader.TileMode.CLAMP));
-            canvas.drawRect(0, 0, w, h, paint);
-        }
-        BitmapDrawable drawable = new BitmapDrawable(getResources(), bmp);
-        drawable.setGravity(Gravity.FILL);
-        // Cross-fade from the colours on screen to the new ones, instead of dipping and coming back.
-        android.graphics.drawable.Drawable old = ambient.getBackground();
-        if (old instanceof android.graphics.drawable.TransitionDrawable) {
-            old = ((android.graphics.drawable.TransitionDrawable) old).getDrawable(1);
-        }
-        if (old != null && ambient.getAlpha() > 0f) {
-            android.graphics.drawable.TransitionDrawable fade = new android.graphics.drawable.TransitionDrawable(
-                    new android.graphics.drawable.Drawable[] {old, drawable});
-            fade.setCrossFadeEnabled(true);
-            ambient.setBackground(fade);
-            fade.startTransition(700);
-        } else {
-            ambient.setBackground(drawable);
-        }
-    }
-
-    /** One aurora blob: the colour turned by hueShift degrees and made vivid, fading out from its centre. */
-    private static void aurora(Canvas canvas, Paint paint, float x, float y, float r, int color, float hueShift, int alpha) {
-        float[] hsv = new float[3];
-        Color.colorToHSV(color, hsv);
-        hsv[0] = (hsv[0] + hueShift + 360f) % 360f;
-        hsv[1] = Math.min(0.7f, Math.max(0.45f, hsv[1]));
-        hsv[2] = Math.max(0.75f, hsv[2]);
-        int c = Color.HSVToColor(hsv) & 0x00FFFFFF;
-        paint.setShader(new RadialGradient(x, y, r,
-                new int[]{(alpha << 24) | c, ((alpha / 3) << 24) | c, c},
-                new float[]{0f, 0.5f, 1f}, Shader.TileMode.CLAMP));
-        canvas.drawRect(0, 0, canvas.getWidth(), canvas.getHeight(), paint);
-    }
-
     private void hideHero() {
         if (!heroShown) return;
         heroShown = false;
-        // As slow as they come in (showHero): leaving the dock while the grid glides up must not blink
-        // the whole screen's colour away.
         heroName.animate().alpha(0f).setDuration(260).setInterpolator(GLIDE).start();
         findViewById(R.id.photoCaption).animate().alpha(0f).setDuration(260).start();
-        ambient.animate().alpha(0f).setDuration(600).setInterpolator(GLIDE).start();
     }
 
     private void hideGlass() {
@@ -935,10 +872,6 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             return col == width - 1 || position == count - 1;
         }
         if (keyCode == KeyEvent.KEYCODE_DPAD_UP) {
-            if (dock && cardShowing()) {                   // dock row: the now playing card above it
-                nowCard.defaultButton().requestFocus();
-                return true;
-            }
             if (dock) return false;                        // dock row: let focus move to the top bar
             if (g < GRID_COLUMNS) {
                 // First grid row: the dock slot under the same horizontal spot.
@@ -1013,6 +946,9 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         if (moduleCards) addSettingsRow(rows, popup, R.drawable.ic_home_settings, R.string.module_cards, 3);
         // Layout and effects (Config.setChoice / setToggle): applied when the menu closes, by rebuilding Home.
         addSeparator(rows);
+        if (LocalWallpapers.folder(this) != null && new File(LocalWallpapers.folder(this), "catalogue.json").isFile()) {
+            addSettingsRow(rows, popup, R.drawable.ic_continue, R.string.next_wallpaper, 5);
+        }
         Config cfg = Config.load(this);
         final int[] layout = {cfg.gridColumns, cfg.advancedEffects ? 1 : 0};
         final int[] atOpen = layout.clone();
@@ -1027,18 +963,6 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             Config.setToggle(this, Config.ADVANCED_EFFECTS, layout[1] == 1);
             recreate();
         });
-        // Switches that stay on the TV (Config.setToggle); the screensaver reads them when it next starts.
-        addSeparator(rows);
-        if (prayerLat != null) {
-            addToggleRow(rows, R.drawable.ic_prayer, R.string.toggle_home_prayer, Config.HOME_PRAYER, homePrayer, on -> {
-                homePrayer = on;
-                updatePrayer();
-            });
-            addToggleRow(rows, R.drawable.ic_prayer, R.string.toggle_dream_prayer, Config.DREAM_PRAYER, cfg.dreamPrayer, null);
-        }
-        addToggleRow(rows, R.drawable.ic_athkar, R.string.toggle_dream_athkar, Config.DREAM_ATHKAR, cfg.dreamAthkar, null);
-        addToggleRow(rows, R.drawable.ic_clock, R.string.toggle_dream_analog, Config.DREAM_ANALOG, cfg.dreamAnalog, null);
-
         for (int i = 0; i < rows.getChildCount(); i++) {
             final int index = i;
             View row = rows.getChildAt(i);
@@ -1075,6 +999,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             if (action == 1) startDockEdit();
             else if (action == 4) showDockEditor();
             else if (action == 2) open(new Intent(Settings.ACTION_SETTINGS));
+            else if (action == 5) {LocalWallpapers.advance(this);refreshWallpaper();}
             else showModuleCards();
         });
         rows.addView(row);
@@ -1097,27 +1022,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     }
 
     /** A row that switches a setting On and Off in place; the menu stays open. */
-    private void addToggleRow(LinearLayout rows, int icon, int title, String key, boolean initial,
-                              java.util.function.Consumer<Boolean> changed) {
-        View row = getLayoutInflater().inflate(R.layout.item_setting, rows, false);
-        ((ImageView) row.findViewById(R.id.icon)).setImageResource(icon);
-        ((TextView) row.findViewById(R.id.title)).setText(title);
-        TextView status = row.findViewById(R.id.status);
-        View dot = row.findViewById(R.id.dot);
-        final boolean[] on = {initial};
-        Runnable show = () -> {
-            status.setText(on[0] ? R.string.toggle_on : R.string.toggle_off);
-            dot.setVisibility(on[0] ? View.VISIBLE : View.GONE);
-        };
-        show.run();
-        row.setOnClickListener(v -> {
-            on[0] = !on[0];
-            Config.setToggle(this, key, on[0]);
-            show.run();
-            if (changed != null) changed.accept(on[0]);
-        });
-        rows.addView(row);
-    }
+
 
     private void showDockEditor() {
         createDockEditor().show();
@@ -1126,14 +1031,14 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     private DockEditor createDockEditor() {
         final List<String> fallback = new ArrayList<>(dockApps);
         Runnable refreshDockAndApps = () -> {
-            dockApps = DockEditor.loadDock(this, fallback, COLUMNS);
+            dockApps = DockEditor.loadDock(this, fallback, COLUMNS - 1);
             appOrder = DockEditor.loadAppOrder(this, dockApps);
             adapter.setDockApps(dockApps);
             adapter.setAppOrder(appOrder);
             reloadTiles();
             restoreFocus();
         };
-        return new DockEditor(this, dockApps, COLUMNS, () -> refreshDockAndApps.run(), () -> {
+        return new DockEditor(this, dockApps, COLUMNS - 1, () -> refreshDockAndApps.run(), () -> {
             appOrder = DockEditor.loadAppOrder(this, dockApps);
             adapter.setAppOrder(appOrder);
             reloadTiles();
@@ -1143,6 +1048,70 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
 
     @Override
     public void onTileLongPressed(int position) {
+        if (dockEditing || reorderMode
+                || (!adapter.isDockPosition(position) && !adapter.isReorderableAppAt(position))) return;
+        showAppMenu(position);
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions, @NonNull int[] results) {
+        super.onRequestPermissionsResult(requestCode, permissions, results);
+        if (requestCode == ContinueWatching.PERMISSION_REQUEST && continueWatching != null
+                && continueWatching.permissionResult() && results.length > 0
+                && results[0] == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            handler.post(() -> {
+                View anchor = tileCardAt(COLUMNS - 1);
+                if (active && anchor != null) continueWatching.open(anchor);
+            });
+        }
+    }
+
+    private void showAppMenu(int position) {
+        String key = adapter.keyAt(position);
+        String pkg = adapter.packageAt(position);
+        if (key == null || pkg == null || getPackageName().equals(pkg)) return;
+        View panel = getLayoutInflater().inflate(R.layout.popup_inputs, root, false);
+        LinearLayout rows = panel.findViewById(R.id.rows);
+        TextView title = new TextView(this);
+        title.setText(adapter.labelAt(position));
+        title.setTextColor(Color.WHITE);
+        title.setTextSize(18);
+        int padding = Math.round(12 * density);
+        title.setPadding(padding, padding, padding, padding);
+        rows.addView(title);
+        final PopupWindow popup = glassPopup(panel, Math.round(280 * density));
+        addInputRow(rows, popup, R.drawable.ic_edit_dock, getString(R.string.app_menu_move), -1, () -> {
+            int current = adapter.positionOf(key);
+            if (current >= 0) startReorder(current);
+        });
+        addInputRow(rows, popup, R.drawable.ic_settings, getString(R.string.app_menu_settings), -1,
+                () -> openAppSettings(pkg));
+        try {
+            ApplicationInfo info = getPackageManager().getApplicationInfo(pkg, 0);
+            if ((info.flags & ApplicationInfo.FLAG_SYSTEM) == 0) {
+                addInputRow(rows, popup, R.drawable.ic_uninstall, getString(R.string.app_menu_uninstall), -1,
+                        () -> openAppAction(new Intent(Intent.ACTION_UNINSTALL_PACKAGE,
+                                Uri.fromParts("package", pkg, null))));
+            }
+        } catch (android.content.pm.PackageManager.NameNotFoundException ignored) { }
+        popup.showAtLocation(root, Gravity.CENTER, 0, 0);
+        rows.getChildAt(1).requestFocus();
+    }
+
+    private void openAppSettings(String pkg) {
+        openAppAction(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                Uri.fromParts("package", pkg, null)));
+    }
+
+    private void openAppAction(Intent intent) {
+        try {
+            startActivity(intent);
+        } catch (ActivityNotFoundException | SecurityException e) {
+            Toast.makeText(this, R.string.not_available, Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private void startReorder(int position) {
         if (dockEditing || reorderMode
                 || (!adapter.isDockPosition(position) && !adapter.isReorderableAppAt(position))) return;
         reorderMode = true;
@@ -1165,6 +1134,10 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
 
     @Override
     public boolean onTileClicked(int position) {
+        if (position == COLUMNS - 1) {
+            if (!dockEditing && !reorderMode) continueWatching.open(tileCardAt(position));
+            return true;
+        }
         if (dockEditing) {
             onDockEditOk(position);
             return true;   // never opens the app while editing
@@ -1247,6 +1220,16 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
                 .withEndAction(() -> reorderHint.setVisibility(View.GONE)).start();
     }
 
+    private void setDrawerOpen(boolean open) {
+        if (drawerOpen == open) return;
+        drawerOpen = open;
+        drawerSurface.animate().cancel();
+        drawerSurface.animate().alpha(open ? 1f : 0f).setDuration(220).start();
+        dockDecoration.drawerOpen = open;
+        grid.invalidateItemDecorations();
+        dimTiles();
+    }
+
     private void dimTiles() {
         for (int i = 0; i < grid.getChildCount(); i++) {
             View item = grid.getChildAt(i);
@@ -1256,6 +1239,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
 
     /** Dim in edit-dock mode: the dock tiles other than the chosen place. */
     private float tileAlpha(int position) {
+        if (position >= COLUMNS && !drawerOpen) return 0f;
         return dockEditSlot >= 0 && position >= 0 && position < COLUMNS && position != dockEditSlot ? 0.45f : 1f;
     }
 
@@ -1293,100 +1277,41 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
 
     // ---- weather --------------------------------------------------------------------------------
 
-    /** Refreshes the weather line at most every 30 minutes, off the main thread. */
+    /** Small bounded request; stale weather is hidden even when refresh fails. */
     private void updateWeather() {
-        if (weatherUrl == null || weatherLoading) return;
         long now = android.os.SystemClock.elapsedRealtime();
-        if (now - weatherAt < WEATHER_MS) return;
+        if (weatherSuccessAt > 0 && now-weatherSuccessAt > 6*60*MINUTE_MS) weather.setVisibility(View.GONE);
+        if (!active || weatherUrl == null || weatherLoading || now-weatherAt < WEATHER_MS) return;
         weatherAt = now;
         weatherLoading = true;
-        new Thread(() -> {
-            String text = null;
-            try {
-                HttpURLConnection c = (HttpURLConnection) new URL(weatherUrl).openConnection();
-                c.setConnectTimeout(8000);
-                c.setReadTimeout(8000);
-                try (InputStream in = c.getInputStream()) {
-                    ByteArrayOutputStream out = new ByteArrayOutputStream();
-                    byte[] buf = new byte[4096];
-                    for (int n; (n = in.read(buf)) > 0; ) out.write(buf, 0, n);
-                    JSONObject cur = new JSONObject(out.toString("UTF-8")).getJSONObject("current");
+        final int ticket = ++weatherGeneration;
+        try {
+            weatherTask = weatherWorker.submit(() -> {
+                String text = null;
+                try {
+                    JSONObject cur = new JSONObject(new String(SafeHttp.fetch(weatherUrl, SafeHttp.JSON_LIMIT),
+                            java.nio.charset.StandardCharsets.UTF_8)).getJSONObject("current");
                     long temp = Math.round(cur.getDouble("temperature_2m"));
-                    String icon = weatherIcon(cur.getInt("weather_code"), cur.optInt("is_day", 1) == 1);
-                    text = icon + "  " + temp + "°" + (weatherPlace.isEmpty() ? "" : "  ·  " + weatherPlace);
-                } finally {
-                    c.disconnect();
-                }
-            } catch (Exception e) {
-                // Offline or the service is down: keep the last reading, retry in 5 minutes.
-                android.util.Log.w("tvhome", "weather: " + e);
-            }
-            final String result = text;
-            handler.post(() -> {
-                weatherLoading = false;
-                if (result == null) {
-                    weatherAt -= WEATHER_MS - 5 * MINUTE_MS;
-                    return;
-                }
-                weather.setText(result);
-                weather.setVisibility(View.VISIBLE);
+                    String icon = weatherIcon(cur.getInt("weather_code"),cur.optInt("is_day",1)==1);
+                    text = icon + "  " + temp + "\u00B0" + (weatherPlace.isEmpty() ? "" : "  \u00B7  " + weatherPlace);
+                } catch (Exception ignored) { }
+                final String result = text;
+                handler.post(() -> {
+                    if (!active || ticket != weatherGeneration || isDestroyed()) return;
+                    weatherLoading = false;
+                    if (result == null) { weatherAt -= WEATHER_MS-5*MINUTE_MS; return; }
+                    weatherSuccessAt = android.os.SystemClock.elapsedRealtime();
+                    weather.setText(result);
+                    weather.setVisibility(View.VISIBLE);
+                });
             });
-        }).start();
-    }
-
-    // ---- prayer times ---------------------------------------------------------------------------
-
-    /** Gold for the moon and for a prayer that is due: warm against the photo, unlike the green of "connected". */
-    static final int PRAYER_GOLD = 0xFFF2C879;
-
-    /** Updates the pill every minute; today's times come from the saved file, or once a day from Aladhan. */
-    private void updatePrayer() {
-        if (!homePrayer) {
-            prayerPill.setVisibility(View.GONE);
-            return;
-        }
-        String key = Prayer.key(prayerLat, prayerLon, prayerMethod);
-        if (prayerDay == null || !prayerDay.key.equals(key)) {
-            Prayer.Day saved = Prayer.cached(this, key);
-            if (saved != null) prayerDay = saved;
-            else fetchPrayer();
-        }
-        if (prayerDay == null) return;
-        Prayer.Next next = Prayer.next(prayerDay);
-        boolean due = next.minutesLeft <= Prayer.NOW_MINUTES;   // the last quarter hour, and "now"
-        prayerName.setText(Prayer.name(this, next.index));
-        prayerName.setTextColor(due ? PRAYER_GOLD : 0xFFFFFFFF);
-        prayerTime.setText(Prayer.time(this, prayerDay.minutes[next.index]));
-        prayerLeft.setText(Prayer.countdown(this, next));
-        prayerLeft.setTextColor(due ? PRAYER_GOLD : 0xB3FFFFFF);
-        prayerIcon.setImageTintList(android.content.res.ColorStateList.valueOf(PRAYER_GOLD));
-        if (prayerPill.getVisibility() != View.VISIBLE) {
-            prayerPill.setAlpha(0f);
-            prayerPill.setVisibility(View.VISIBLE);
-            prayerPill.animate().alpha(1f).setDuration(400).start();
+        } catch (java.util.concurrent.RejectedExecutionException e) {
+            weatherLoading = false;
+            weatherAt = -WEATHER_MS;
         }
     }
 
-    /** At most every 5 minutes while the times are missing, off the main thread. */
-    private void fetchPrayer() {
-        long now = android.os.SystemClock.elapsedRealtime();
-        if (prayerLoading || now - prayerAt < 5 * MINUTE_MS) return;
-        prayerAt = now;
-        prayerLoading = true;
-        final String lat = prayerLat, lon = prayerLon;
-        final int method = prayerMethod;
-        new Thread(() -> {
-            Prayer.Day day = Prayer.fetch(getApplicationContext(), lat, lon, method);
-            handler.post(() -> {
-                prayerLoading = false;
-                if (day == null) return;
-                prayerDay = day;
-                updatePrayer();
-            });
-        }).start();
-    }
-
-    /** WMO weather code (as used by Open-Meteo) to an emoji. Also used by ClockDream. */
+    /** WMO weather code (as used by Open-Meteo) to an emoji.  */
     static String weatherIcon(int code, boolean day) {
         if (code == 0) return day ? "\u2600\uFE0F" : "\uD83C\uDF19";                  // clear: sun / moon
         if (code <= 2) return day ? "\u26C5" : "\u2601\uFE0F";                          // partly cloudy
@@ -1399,86 +1324,69 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         return "\uD83C\uDF27\uFE0F";                                                    // rain and showers
     }
 
-    // ---- now playing ----------------------------------------------------------------------------
-
-    private void showNowPlaying(NowPlaying.Track t) {
-        track = t;
-        nowCard.bind(t);
-        updateCard();
-    }
-
-    private boolean cardShowing() {
-        return nowCard != null && nowCard.getVisibility() == View.VISIBLE;
-    }
-
-    /** The pill shows while something plays or is paused. */
-    private void updateCard() {
-        if (nowCard == null) return;
-        boolean show = nowCard.hasTrack();
-        if (show && nowCard.getVisibility() != View.VISIBLE) {
-            nowCard.setVisibility(View.VISIBLE);
-            nowCard.animate().alpha(1f).setDuration(300).start();
-        } else if (!show && nowCard.getVisibility() == View.VISIBLE) {
-            if (nowCard.hasFocus()) focusTile(lastFocused % COLUMNS);
-            nowCard.animate().alpha(0f).setDuration(300).withEndAction(() -> {
-                if (!nowCard.hasTrack()) nowCard.setVisibility(View.GONE);
-            }).start();
-        }
-    }
-
     // ---- photo of the day -----------------------------------------------------------------------
 
-    /** Today's photo behind the home screen, once a day; the glass follows it. */
+    private void refreshWallpaper() {
+        photoGeneration++;
+        if(photoTask!=null)photoTask.cancel(true);
+        photoSlot=null;
+        loadHomePhoto();
+    }
+
+    /** Rotate local photos (or Bing when no local collection exists), retaining the last good image on errors. */
     private void loadHomePhoto() {
-        Calendar now = Calendar.getInstance();
-        String slot = new java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.ROOT).format(now.getTime())
-                + '/' + now.get(Calendar.HOUR_OF_DAY) / PHOTO_HOURS;
-        if (slot.equals(photoSlot)) return;
-        photoSlot = slot;
+        if (!active) return;
+        String slot = System.currentTimeMillis()/PHOTO_INTERVAL_MS + ":" + LocalWallpapers.version(this);
+        if (slot.equals(photoSlot) || (photoTask != null && !photoTask.isDone())) return;
+        final int ticket = ++photoGeneration;
+        final boolean cacheFirst = photoSlot == null;
         android.util.DisplayMetrics dm = getResources().getDisplayMetrics();
-        final int w = dm.widthPixels, h = dm.heightPixels;
-        new Thread(() -> {
-            java.util.List<DailyPhoto.Photo> list = DailyPhoto.list(this);
-            // A random photo from the list for each slot, the same one all through the slot. If it can't
-            // be had (offline and not cached), the next ones in the list, up to three.
-            int start = list.isEmpty() ? 0 : new java.util.Random(slot.hashCode()).nextInt(list.size());
-            DailyPhoto.Photo chosen = null;
-            Bitmap loaded = null;
-            for (int i = 0; i < Math.min(3, list.size()) && loaded == null; i++) {
-                chosen = list.get((start + i) % list.size());
-                loaded = DailyPhoto.load(this, chosen, w);
-            }
-            final Bitmap bmp = loaded;
-            final DailyPhoto.Photo p = chosen;
-            if (bmp != null) bakeScrim(bmp);
-            Bitmap blurred = bmp == null ? null : Backdrop.blur(bmp, w, h);
-            handler.post(() -> {
-                if (bmp == null) {
-                    photoSlot = null;   // offline with nothing cached: try again in a minute
-                    return;
+        final int w=dm.widthPixels, h=dm.heightPixels;
+        final android.content.Context app=getApplicationContext();
+        try {
+            photoTask = photoWorker.submit(() -> {
+                LocalWallpapers.Snapshot local=LocalWallpapers.read(app);
+                java.util.List<DailyPhoto.Photo> list=local.configured?local.photos:DailyPhoto.list(app,()->!active || ticket!=photoGeneration);
+                int start=list.isEmpty() ? 0 : (int)Math.floorMod(System.currentTimeMillis()/PHOTO_INTERVAL_MS + (local.configured?LocalWallpapers.offset(app):0),(long)list.size());
+                DailyPhoto.Photo chosen=null;
+                Bitmap loaded=null;
+                if (cacheFirst) {
+                    for (int i=0; i<list.size() && loaded==null && !Thread.currentThread().isInterrupted(); i++) {
+                        DailyPhoto.Photo cached=list.get((start+i)%list.size());
+                        if (DailyPhoto.isCached(app,cached)) { chosen=cached; loaded=DailyPhoto.load(app,cached,w); }
+                    }
                 }
-                ImageView photo = findViewById(R.id.homePhoto);
-                Drawable old = photo.getDrawable();
-                if (old != null && photo.getAlpha() > 0f) {
-                    // Already showing one: cross-fade to the new photo, then drop the old bitmap.
-                    android.graphics.drawable.TransitionDrawable fade = new android.graphics.drawable.TransitionDrawable(
-                            new Drawable[] {old, new BitmapDrawable(getResources(), bmp)});
-                    fade.setCrossFadeEnabled(true);
-                    photo.setImageDrawable(fade);
-                    fade.startTransition(1500);
-                    photo.postDelayed(() -> {
-                        if (photo.getDrawable() == fade) photo.setImageBitmap(bmp);
-                    }, 1600);
-                } else {
-                    photo.setImageBitmap(bmp);
+                for (int i=0; i<Math.min(2,list.size()) && loaded==null && !Thread.currentThread().isInterrupted(); i++) {
+                    chosen=list.get((start+i)%list.size());
+                    loaded=DailyPhoto.load(app,chosen,w);
                 }
-                photo.animate().alpha(1f).setDuration(900).withEndAction(this::dropHiddenLayers).start();
-                backdrop.set(blurred, w, h);
-                TextView caption = findViewById(R.id.photoCaption);
-                caption.setText(p.credit.isEmpty() ? p.title : p.title + "  ·  " + p.credit);
-                if (heroShown) caption.animate().alpha(1f).setDuration(900).start();
+                final Bitmap bmp=loaded;
+                final DailyPhoto.Photo p=chosen;
+                if (bmp == null) return;
+                if (Thread.currentThread().isInterrupted()) {bmp.recycle();return;}
+                bakeScrim(bmp);
+                Bitmap blurred=Backdrop.blur(bmp,w,h);
+                handler.post(() -> {
+                    if (!active || ticket!=photoGeneration || isDestroyed()) {bmp.recycle();blurred.recycle();return;}
+                    photoSlot=slot;
+                    ImageView photo=findViewById(R.id.homePhoto);
+                    Drawable old=photo.getDrawable();
+                    if (old != null && photo.getAlpha()>0f) {
+                        android.graphics.drawable.TransitionDrawable fade=new android.graphics.drawable.TransitionDrawable(
+                                new Drawable[]{old,new BitmapDrawable(getResources(),bmp)});
+                        fade.setCrossFadeEnabled(true); photo.setImageDrawable(fade); fade.startTransition(1000);
+                        photo.postDelayed(() -> {if (photo.getDrawable()==fade) photo.setImageBitmap(bmp);},1100);
+                    } else photo.setImageBitmap(bmp);
+                    photo.animate().alpha(1f).setDuration(350).withEndAction(this::dropHiddenLayers).start();
+                    backdrop.set(blurred,w,h);
+                    TextView caption=findViewById(R.id.photoCaption);
+                    caption.setText(p.title.isEmpty()?p.credit:p.credit.isEmpty()?p.title:p.localFile!=null?p.credit+"  \u00B7  "+p.title:p.title+"  \u00B7  "+p.credit);
+                    if (heroShown) caption.animate().alpha(1f).setDuration(350).start();
+                });
             });
-        }).start();
+        } catch (java.util.concurrent.RejectedExecutionException ignored) {
+            handler.postDelayed(() -> { if (active && ticket==photoGeneration) loadHomePhoto(); },1000);
+        }
     }
 
     /**
@@ -1501,10 +1409,6 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     private void dropHiddenLayers() {
         getWindow().setBackgroundDrawable(null);
         root.setBackground(null);
-        // The ambient glow was drawn for the plain background; repaint it as an aurora for the photo.
-        int c = ambientColor;
-        ambientColor = 0;
-        if (c != 0) setAmbient(c);
     }
 
     /** A top button: liquid glass over the photo, solid white while focused. */
@@ -1516,26 +1420,6 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         bg.addState(new int[] {android.R.attr.state_focused}, on);
         bg.addState(new int[] {}, new GlassDrawable(pill, backdrop, 21 * density, density));
         return bg;
-    }
-
-    /** Album art scaled to a square with rounded corners. Also used by ClockDream. */
-    static Bitmap roundedArt(Bitmap art, int size) {
-        return roundedArt(art, size, 0.18f);
-    }
-
-    /** The cover cropped square with corners of radius × size; 0.5 gives a circle. */
-    static Bitmap roundedArt(Bitmap art, int size, float radius) {
-        Bitmap out = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888);
-        Canvas c = new Canvas(out);
-        Paint p = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
-        float r = size * radius;
-        c.drawRoundRect(0, 0, size, size, r, r, p);
-        p.setXfermode(new android.graphics.PorterDuffXfermode(android.graphics.PorterDuff.Mode.SRC_IN));
-        int side = Math.min(art.getWidth(), art.getHeight());
-        Rect src = new Rect((art.getWidth() - side) / 2, (art.getHeight() - side) / 2,
-                (art.getWidth() + side) / 2, (art.getHeight() + side) / 2);
-        c.drawBitmap(art, src, new Rect(0, 0, size, size), p);
-        return out;
     }
 
     /** Shows the Wi-Fi network name on the button when we can read it, otherwise the connection type. */

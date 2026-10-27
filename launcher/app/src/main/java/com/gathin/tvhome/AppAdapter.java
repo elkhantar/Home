@@ -58,7 +58,7 @@ public class AppAdapter extends RecyclerView.Adapter<AppAdapter.Holder> {
     }
 
     static final class Entry {
-        static final int APP = 0, HOME_SETTINGS = 1, CARD = 2, EMPTY_DOCK = 3;
+        static final int APP = 0, HOME_SETTINGS = 1, CARD = 2, EMPTY_DOCK = 3, CONTINUE = 4;
 
         final int kind;
         final String label;
@@ -69,7 +69,6 @@ public class AppAdapter extends RecyclerView.Adapter<AppAdapter.Holder> {
         /** Text under the tile when it is focused in the grid: the label, plus the caption for a card. */
         final String name;
         /** Ambient glow colour; 0 until sampled from the banner, or the card's accent from the start. */
-        int ambient;
         /** Fill behind a square banner shown whole; 0 until sampled. */
         int squareFill;
 
@@ -89,7 +88,6 @@ public class AppAdapter extends RecyclerView.Adapter<AppAdapter.Holder> {
             this.banner = banner;
             this.icon = icon;
             this.name = caption == null ? label : label + " \u00B7 " + caption;
-            this.ambient = accent;
         }
     }
 
@@ -143,7 +141,7 @@ public class AppAdapter extends RecyclerView.Adapter<AppAdapter.Holder> {
         this.listener = listener;
         this.dockSize = dockSize;
         this.gridColumns = cfg.gridColumns;
-        this.favourites = new ArrayList<>(dockApps);
+        this.favourites = new ArrayList<>(dockApps.subList(0, Math.min(dockApps.size(), dockSize - 1)));
         this.appOrder = new ArrayList<>(appOrder);
         this.hidden = new HashSet<>(cfg.hiddenApps);
         this.showHomeSettings = cfg.showHomeSettingsShortcut;
@@ -176,6 +174,12 @@ public class AppAdapter extends RecyclerView.Adapter<AppAdapter.Holder> {
         // allowing the alphabetical grid to slide up into the dock.
         List<Entry> fresh = new ArrayList<>();
         for (int slot = 0; slot < dockSize; slot++) {
+            if (slot == dockSize - 1) {
+                fresh.add(new Entry(Entry.CONTINUE, ctx.getString(R.string.continue_title),
+                        new ComponentName(ctx.getPackageName(), "ContinueWatching"), null,
+                        ctx.getDrawable(R.drawable.ic_continue), null, 0));
+                continue;
+            }
             String pkg = slot < favourites.size() ? favourites.get(slot) : null;
             ResolveInfo ri = pkg == null ? null : byPackage.get(pkg);
             if (ri == null) {
@@ -258,7 +262,7 @@ public class AppAdapter extends RecyclerView.Adapter<AppAdapter.Holder> {
     }
 
     void setDockApps(List<String> dockApps) {
-        favourites = new ArrayList<>(dockApps);
+        favourites = new ArrayList<>(dockApps.subList(0, Math.min(dockApps.size(), dockSize - 1)));
     }
 
     void setAppOrder(List<String> appOrder) {
@@ -336,6 +340,10 @@ public class AppAdapter extends RecyclerView.Adapter<AppAdapter.Holder> {
         } else {
             h.banner.setImageDrawable(null);
             h.banner.setVisibility(View.GONE);
+            ViewGroup.MarginLayoutParams iconLp = (ViewGroup.MarginLayoutParams) h.icon.getLayoutParams();
+            iconLp.width = iconLp.height = Math.round((e.kind == Entry.CONTINUE ? 32 : 48) * density());
+            iconLp.bottomMargin = Math.round((e.kind == Entry.CONTINUE ? 10 : 14) * density());
+            h.icon.setLayoutParams(iconLp);
             h.icon.setImageDrawable(e.icon);
             h.icon.setVisibility(View.VISIBLE);
             h.label.setText(e.label);
@@ -356,7 +364,7 @@ public class AppAdapter extends RecyclerView.Adapter<AppAdapter.Holder> {
 
     /** Opens the tile's activity by explicit component, with no extras: a card can name nothing else. */
     private void launch(Entry e) {
-        if (e.kind == Entry.EMPTY_DOCK) return;
+        if (e.kind == Entry.EMPTY_DOCK || e.kind == Entry.CONTINUE) return;
         if (e.kind == Entry.HOME_SETTINGS) {
             ctx.startActivity(new Intent(ctx, HomeSettingsActivity.class)
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
@@ -410,7 +418,7 @@ public class AppAdapter extends RecyclerView.Adapter<AppAdapter.Holder> {
 
     /** True for a visible app in the fixed dock row (cards are valid dock entries too). */
     boolean isDockPosition(int position) {
-        return position >= 0 && position < dockSize && isFocusableAt(position);
+        return position >= 0 && position < dockSize - 1 && isFocusableAt(position);
     }
 
     /** True for an installed application or a module card in the reorderable grid. */
@@ -421,7 +429,7 @@ public class AppAdapter extends RecyclerView.Adapter<AppAdapter.Holder> {
 
     /** Package name for the visible tile at a position, or null for an empty/invalid slot. */
     String packageAt(int position) {
-        return isFocusableAt(position) ? items.get(position).pkg : null;
+        return isFocusableAt(position) && items.get(position).kind != Entry.CONTINUE ? items.get(position).pkg : null;
     }
 
     List<String> dockApps() {
@@ -442,7 +450,7 @@ public class AppAdapter extends RecyclerView.Adapter<AppAdapter.Holder> {
         if (isDockPosition(position)) {
             if (keyCode != KeyEvent.KEYCODE_DPAD_LEFT && keyCode != KeyEvent.KEYCODE_DPAD_RIGHT) return -1;
             target = position + (keyCode == KeyEvent.KEYCODE_DPAD_LEFT ? -1 : 1);
-            if (target < 0 || target >= dockSize || !isFocusableAt(target)) return -1;
+            if (target < 0 || target >= dockSize - 1 || !isFocusableAt(target)) return -1;
             String movedPkg = favourites.remove(position);
             favourites.add(target, movedPkg);
         } else if (isReorderableAppAt(position)) {
@@ -476,14 +484,6 @@ public class AppAdapter extends RecyclerView.Adapter<AppAdapter.Holder> {
         return target;
     }
 
-    /** A vivid colour sampled from the app's banner (or icon), cached per entry; a card's accent when it set one. */
-    int ambientColorAt(int position) {
-        if (position < 0 || position >= items.size()) return 0xFF444444;
-        Entry e = items.get(position);
-        if (e.ambient == 0) e.ambient = vividColor(e.banner != null ? e.banner : e.icon);
-        return e.ambient;
-    }
-
     /** A banner closer to square than 4:3, i.e. an icon standing in for one. */
     private static boolean isSquare(Drawable d) {
         int w = d.getIntrinsicWidth(), h = d.getIntrinsicHeight();
@@ -504,48 +504,6 @@ public class AppAdapter extends RecyclerView.Adapter<AppAdapter.Holder> {
         int p = bmp.getPixel(1, 1);
         bmp.recycle();
         return p | 0xFF000000;
-    }
-
-    private static int vividColor(Drawable live) {
-        if (live == null) return 0xFF444444;
-        // Draw a private copy: changing the bounds of the drawable an ImageView shows would blank the tile.
-        Drawable d = live.getConstantState() != null ? live.getConstantState().newDrawable().mutate() : live;
-        Rect saved = new Rect(d.getBounds());
-        int n = 12;
-        Bitmap bmp = Bitmap.createBitmap(n, n, Bitmap.Config.ARGB_8888);
-        Canvas c = new Canvas(bmp);
-        d.setBounds(0, 0, n, n);
-        d.draw(c);
-        d.setBounds(saved);
-        float[] hsv = new float[3];
-        int best = 0xFF444444;
-        float bestScore = -1f;
-        long r = 0, g = 0, b = 0;
-        for (int y = 0; y < n; y++) {
-            for (int x = 0; x < n; x++) {
-                int p = bmp.getPixel(x, y);
-                r += Color.red(p);
-                g += Color.green(p);
-                b += Color.blue(p);
-                Color.colorToHSV(p, hsv);
-                float score = hsv[1] * Math.min(1f, hsv[2] * 1.4f);   // saturated and not too dark
-                if (score > bestScore) {
-                    bestScore = score;
-                    best = p;
-                }
-            }
-        }
-        bmp.recycle();
-        if (bestScore < 0.25f) {   // nearly monochrome banner (e.g. white): use its average, lifted
-            int avg = Color.rgb((int) (r / (n * n)), (int) (g / (n * n)), (int) (b / (n * n)));
-            Color.colorToHSV(avg, hsv);
-            hsv[2] = Math.max(hsv[2], 0.55f);
-            return Color.HSVToColor(hsv);
-        }
-        Color.colorToHSV(best, hsv);
-        hsv[1] = Math.min(1f, hsv[1] * 1.1f);
-        hsv[2] = Math.max(0.5f, hsv[2]);
-        return Color.HSVToColor(hsv);
     }
 
     /** Advanced effects: how far the focused tile rises (dp), its shadow's height (dp) and its picture's extra zoom. */

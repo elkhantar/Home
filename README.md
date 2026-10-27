@@ -1,79 +1,108 @@
-<h1 align="center">CleanXiaomiTV</h1>
+# Home
 
-<p align="center">My Xiaomi TV, minus the ads: a clean home screen, a richer screensaver and live channels.</p>
+An ad-free Android TV launcher with a frosted-glass app drawer, rotating photographs,
+clock, weather and Continue watching. Built for a family Xiaomi TV and tested on a
+MiTV-MSSP3 running Android 9, with a 1920 x 1080 Android UI on a 4K panel.
 
-![The home screen: today's photo, the next prayer under the clock, the song playing under the glass buttons, and the dock](docs/screenshot-home.png)
+Home is a modified fork of [CleanXiaomiTV](https://github.com/majnioui/CleanXiaomiTV)
+by majnioui, based on [CleanYourTV](https://github.com/Gathin23/cleanyourtv) by Gathin.
+The upstream base is commit `5d371afffad6439daf9eae0a7f569ceb88e637cf`.
+See [credits and licenses](ATTRIBUTIONS.md). This is an independent personal fork.
 
-<table>
-  <tr>
-    <td width="50%"><img src="docs/screenshot-grid.png" alt="All apps in smaller tiles, five to a row"></td>
-    <td width="50%"><img src="docs/screenshot-move.png" alt="Move mode: hold OK on a tile and move it with the arrows"></td>
-  </tr>
-  <tr>
-    <td align="center">All apps, five to a row</td>
-    <td align="center">Hold OK to move an app with the remote</td>
-  </tr>
-</table>
+## Features
 
-![The screensaver: photo of the day, time and weather top left, the song playing bottom left](docs/screenshot-screensaver.jpg)
+- Five editable favourites plus a fixed **Continuar** button in the top row.
+- A dark, frosted drawer that opens when navigating down, with configurable apps per row.
+- Clock, date and Open-Meteo weather; complete Spanish menu translations.
+- Rotating local wallpapers with photographer credits, publication date, location and
+  photographer caption when verified metadata is available. No generated alt text.
+- Full-colour ARGB8888 decoding; curated images are 1920 x 1080 WebP quality 90.
+- **Siguiente fondo** advances immediately. The comparison-quality switch has been removed.
+- Continue watching lists up to ten unfinished items or next episodes published by installed
+  apps through Android TV's Watch Next provider. Availability depends on each streaming app.
+- Long-press to move an app, open its Android settings (including Force stop), or request
+  uninstall with Android's confirmation. System apps and Home are excluded from uninstall.
+- Optional module cards. Forslag has not been integrated or tested as an add-on here.
 
-**Built and tested on** a Xiaomi MiTV-MOOR2 (venom), Google TV / Android 11, MediaTek, 1080p.
+Prayer times, athkar, Now Playing, accessibility key services and the replacement screensaver
+were removed. The TV's existing screensaver remains in use. Drive sign-in and automatic
+Unsplash photo discovery are not implemented.
 
-## What it does
+## Build
 
-- **Debloat**: [`debloat.txt`](debloat.txt) disables 37 packages: Xiaomi and Google telemetry, PatchWall and the ad rows, demo mode, duplicate cast services, preloaded apps and unused system leftovers. Nothing is uninstalled, and one command restores everything.
-- **Ad-blocking DNS**: the installer points the TV's Private DNS at [AdGuard](https://adguard-dns.io), so ads and trackers are blocked in every app.
-- **Home screen**: today's photo of the day behind everything, with liquid glass buttons, dock and menus over it; the weather next to the clock and the next prayer with a countdown under it; a dock of four apps and five smaller tiles per row below it, out of sight until you press Down. Hold OK on a tile to move it. English and Arabic.
-- **Now playing**: while Spotify or another music app plays, a slim glass pill under the top buttons with the cover, song, artist and previous / play-pause / next, tinted in the cover's colour. Hold OK on it to open the app.
-- **Screensaver**: photos of the day with a slow zoom, the time, weather and today's prayer times top left, the song playing bottom left, and a thikr with its source bottom right, a new one every minute.
-- **Your choice**: prayer times on Home, prayer times on the screensaver and athkar can each be switched On or Off from the Settings button, no rebuild needed.
-- **Apps** in [`modules/`](modules/): **Weather** (7-day forecast, city search) and **Prayer Times** (Morocco method, countdown to the next prayer). They show up on the home screen as cards. For live TV, [**M3U Lite**](https://github.com/majnioui/m3u-lite), an IPTV player for your own M3U playlists and Xtream Codes accounts, is a separate app that shows up as a card too.
+Requires JDK 17, Android SDK 34/build-tools 34.0.0 and Gradle 8.9.
+The local Windows build script expects a sibling `.toolchain` directory containing
+`jdk/jdk-17*`, `sdk` and `gradle-8.9`:
 
-## Install
-
-On the TV: Settings → Device Preferences → About → press OK on **Build** seven times, then Developer options → **USB debugging** on.
-
-On a computer on the same Wi-Fi, with JDK 17 and the Android SDK (`brew install openjdk@17 android-commandlinetools`, then `sdkmanager "platforms;android-34" "build-tools;34.0.0"`):
-
-```bash
-python3 -m venv tools/venv && tools/venv/bin/pip install -r tools/requirements.txt
-export TV_HOST=192.168.1.50                     # your TV's IP; accept "Allow USB debugging?" on the TV
-
-tools/disable.sh debloat.txt                     # debloat
-INPUT_KEY_SERVICE=1 launcher/build-and-install.sh   # the launcher, made the default home
-
-cd modules && ./gradlew assembleRelease && cd ..   # the apps
-for m in weather prayer; do
-  tools/venv/bin/python -I tools/b64push.py modules/$m/build/outputs/apk/release/$m-release.apk /data/local/tmp/$m.apk
-  tools/venv/bin/python -I tools/tv.py "pm install -r /data/local/tmp/$m.apk; rm -f /data/local/tmp/$m.apk"
-done
-
-# the screensaver
-tools/venv/bin/python -I tools/tv.py 'settings put secure screensaver_components com.majnioui.cleanxiaomitv/com.gathin.tvhome.ClockDream; settings put secure screensaver_enabled 1'
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\build-personal.ps1 -Release
+python tools/verify-candidate.py
 ```
 
-`INPUT_KEY_SERVICE=1` keeps the remote's Input button working once the stock home is gone, and on Xiaomi remotes the YouTube and Apps buttons too; Android switches it off on every reinstall, so pass it each time. `PRIVATE_DNS=off` skips the AdGuard DNS.
+The script creates a personal key in ignored `local/personal.jks` if absent, then builds,
+runs tests and Android lint. Its sandbox compiler bridge works around restricted Java
+ZipFS operations; Gradle still handles resources, R8, packaging and tests. For a normal
+build, use the Gradle wrapper under `launcher` after setting up the SDK and signing key.
 
-## Configure
+Package: `com.privs.tvhome`. APK: `launcher/app/build/outputs/apk/release/app-release.apk`.
+The installed version is `1.11-spanish-menus` (code 12). The last verified build passed
+72 tests and lint with 0 errors and 123 warnings. Other inherited locales are partial.
 
-Everything is in [`launcher/app/src/main/res/values/config.xml`](launcher/app/src/main/res/values/config.xml): the dock apps, hidden apps, the weather city (Casablanca by default), `grid_columns`, and switches for each feature (`home_photo`, `dream_photos`, `dream_athkar`, `home_prayer`, `dream_prayer`, `now_playing`). The athkar and prayer-time switches can also be flipped on the TV: Settings pill, then the On/Off rows at the bottom; that choice wins over `config.xml` and a theme. Rebuild with `launcher/build-and-install.sh`, or push a theme from [`themes/`](themes/) without rebuilding.
+**Signing:** the personal key is not distributed. Keep your own key backed up for future
+updates. The build file uses a local development password, not a production secret.
+The verifier intentionally pins the author's certificate: another builder must change
+that pin in `tools/verify-candidate.py` to their own independently verified certificate
+before using the preview installer. An APK signed with another key cannot update an
+existing installation under the same package name.
 
-## Undo
+## Install and recover
 
-```bash
-TV_HOST=192.168.1.50 tools/restore.sh debloat.txt com.google.android.apps.tv.launcherx
+Enable ADB debugging and approve your computer on your own TV. Build and verify first:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install-preview.ps1 -TvHost 192.168.1.40
 ```
 
-This re-enables every package in the list, gives Home back to the stock Google TV launcher and switches the AdGuard DNS off. Remove the launcher afterwards in Settings → Apps if you like.
+Replace the example address with your TV's IP. The installer verifies the staged APK and
+pulls back the installed APK to compare bytes. It preserves the existing default Home;
+it does not disable launchers, change DNS, grant permissions or replace the screensaver.
+Open Home from the app list to test it before selecting it as the default in Android.
 
-## Network
+Some Xiaomi firmware requires a vendor-specific workaround to change the default.
+[Installation and recovery](docs/INSTALLATION.md) records the tested procedure and limits.
+Do not run inherited debloat, theme or restore tools unchanged: their assumptions and
+package IDs belong to upstream and they can alter unrelated TV settings.
 
-No analytics and no accounts. The only requests the TV makes for these features go to:
-[Open-Meteo](https://open-meteo.com) for the weather (only the city's coordinates), Bing's photo of the day
-archive for the home screen and the screensaver, [Aladhan](https://aladhan.com) for prayer times,
-and AdGuard as the DNS resolver. Each can be
-switched off in `config.xml` (or by not installing that app).
+## Privacy and resources
 
-## Credits
+No accounts, analytics, notification listener, accessibility service or broad storage
+permission. The five permissions are Internet, network state, Wi-Fi state, request
+uninstall and read TV listings. TV-listings consent is requested when enabling Continuar;
+request-uninstall only opens Android's confirmation.
 
-Built on [CleanYourTV](https://github.com/Gathin23/cleanyourtv) by [Gathin](https://github.com/Gathin23). MIT licensed, see [`LICENSE`](LICENSE). Font: Outfit (OFL). Icons: Material (Apache 2.0), Feather (MIT), Lucide (ISC).
+The TV's built-in network clients allow HTTPS only to Bing and Open-Meteo, reject redirects,
+and bound responses and worker queues. Weather sends the configured city coordinates.
+Local wallpapers live in Home's own external-files directory and need no storage grant.
+The offline-signed catalogue and each image hash are verified before decoding. Private
+signing keys and Unsplash API credentials stay on the computer.
+
+The app uses cached blur surfaces and releases wallpaper references when stopped. The
+curated photo collection is user-provided and is not included in this repository. Bing
+is the fallback when no local catalogue is configured. Its cache is capped at 12 files /
+24 MiB with a 64 MiB free-space reserve. The curated collection has its own separate
+limits. See the linked implementation notes for exact validation and failure behavior.
+
+## Documentation
+
+- [Wallpapers and metadata workflow](docs/LOCAL_WALLPAPERS.md)
+- [Continue watching, service support and safe deep links](docs/WATCH_NEXT.md)
+- [Spanish localization](docs/SPANISH_LOCALIZATION.md)
+- [Installation and recovery](docs/INSTALLATION.md)
+- [Security model and limitations](SECURITY.md)
+- [Performance measurements](PERFORMANCE.md)
+- [Version history](CHANGELOG.md)
+- [Build and TV validation record](CANDIDATE.md) (dated observations, not a device guarantee)
+- [Credits and third-party licenses](ATTRIBUTIONS.md)
+
+Source code is MIT licensed with the original copyright retained. Fonts, icons,
+third-party dependencies, photographs and service data retain their own licenses.

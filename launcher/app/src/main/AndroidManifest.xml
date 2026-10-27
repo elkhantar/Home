@@ -8,13 +8,13 @@
 
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
-    <!-- Needed on Android 10 to read the Wi-Fi network name; granted over adb at install time. -->
-    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
-    <!-- Weather on the home screen (Open-Meteo, see config.xml). -->
-    <uses-permission android:name="android.permission.INTERNET" />
 
-    <!-- Android 11+ package visibility: lets the launcher list the TV apps it shows as tiles, and the
-         apps that declare a module card (docs/specs/card.md). -->
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES" />
+    <uses-permission android:name="android.permission.READ_TV_LISTINGS" />
+
+
     <queries>
         <intent>
             <action android:name="android.intent.action.MAIN" />
@@ -28,8 +28,8 @@
 
     <application
         android:label="@string/launcher_name"
-        android:icon="@mipmap/ic_launcher"
-        android:banner="@drawable/banner"
+        android:icon="@drawable/home_icon_hd"
+        android:banner="@drawable/home_banner_hd"
         android:theme="@style/Theme.TvHome"
         android:allowBackup="false"
         android:localeConfig="@xml/locales_config">
@@ -48,7 +48,7 @@
                 <category android:name="android.intent.category.HOME" />
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
-            <!-- Listed in the TV's own app list, so it can be opened from the stock home screen too. -->
+
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
@@ -61,57 +61,11 @@
             android:taskAffinity=""
             android:excludeFromRecents="true"
             android:theme="@android:style/Theme.NoDisplay" />
-        <!-- Home button for remotes that send KEYCODE_ALL_APPS (Xiaomi). Opt-in: HOME_KEY_SERVICE=1
-             build-and-install.sh; see HomeKeyService. -->
-        <service
-            android:name=".HomeKeyService"
-            android:label="@string/home_key_name"
-            android:exported="true"
-            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
-            <intent-filter>
-                <action android:name="android.accessibilityservice.AccessibilityService" />
-            </intent-filter>
-            <meta-data
-                android:name="android.accessibilityservice"
-                android:resource="@xml/home_key_service" />
-        </service>
 
-        <!-- Screensaver: pick it in Settings, or `settings put secure screensaver_components
-             com.majnioui.cleanxiaomitv/com.gathin.tvhome.ClockDream` over adb. -->
-        <!-- Notification access, used only to read media sessions for the now playing pill (NowPlaying).
-             Granted over adb at install (cmd notification allow_listener). -->
-        <service
-            android:name=".MediaListener"
-            android:label="@string/app_name"
-            android:exported="true"
-            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
-            <intent-filter>
-                <action android:name="android.service.notification.NotificationListenerService" />
-            </intent-filter>
-        </service>
-        <service
-            android:name=".ClockDream"
-            android:label="@string/dream_name"
-            android:exported="true"
-            android:permission="android.permission.BIND_DREAM_SERVICE">
-            <intent-filter>
-                <action android:name="android.service.dreams.DreamService" />
-                <category android:name="android.intent.category.DEFAULT" />
-            </intent-filter>
-        </service>
 
-        <!-- The remote's Input, YouTube and Apps buttons; see InputKeyService. -->
-        <service
-            android:name=".InputKeyService"
-            android:exported="false"
-            android:label="@string/app_name"
-            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
-            <intent-filter>
-                <action android:name="android.accessibilityservice.AccessibilityService" />
-            </intent-filter>
-            <meta-data
-                android:name="android.accessibilityservice"
-                android:resource="@xml/input_key_service" />
-        </service>
-    </application>
+
+
+
+
+</application>
 </manifest>

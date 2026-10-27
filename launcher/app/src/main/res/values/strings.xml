@@ -34,15 +34,13 @@
     <string name="not_available">Not available on this TV</string>
     <string name="cant_open">Can\'t open %1$s</string>
     <string name="date_format">EEEE  d MMMM</string>
-    <string name="dream_name">Clock</string>
+
     <string name="vpn">VPN</string>
     <string name="vpn_off">VPN off</string>
     <string name="home_settings">Default home</string>
     <string name="home_settings_help">Choose a home screen in system settings, then press Home.</string>
-    <string name="input_key_service_description">Opens the input switcher, YouTube or this launcher when the remote\'s Input, YouTube or Apps button is pressed.</string>
-    <string name="home_key_name">Home button</string>
-    <string name="home_key_description">Makes the remote\'s Home button open this launcher.</string>
-    <string name="card_prompt_title">New card from %1$s</string>
+<string name="home_key_name">Home button</string>
+<string name="card_prompt_title">New card from %1$s</string>
     <string name="card_prompt_body">%1$s can show a card on your home screen. Keeping it hidden also takes the app off your home screen, unless you pinned it to the dock.</string>
     <string name="card_prompt_names">The card is named \'%1$s\'. The app is \'%2$s\'.</string>
     <string name="card_prompt_resigned">%1$s was updated with a different signing key, so your earlier answer no longer applies. Decide again for its card.</string>
@@ -61,25 +59,33 @@
     <string name="card_state_new">New</string>
     <string name="card_state_new_key">New key</string>
     <string name="card_state_new_label">New name</string>
-    <string name="toggle_home_prayer">Prayer times on Home</string>
-    <string name="toggle_dream_prayer">Prayer times on screensaver</string>
-    <string name="toggle_dream_athkar">Athkar on screensaver</string>
-    <string name="toggle_dream_analog">Analog clock on screensaver</string>
+
+
     <string name="toggle_on">On</string>
     <string name="toggle_off">Off</string>
-    <string name="prayer_fajr">Fajr</string>
-    <string name="prayer_sunrise">Sunrise</string>
-    <string name="prayer_dhuhr">Dhuhr</string>
-    <string name="prayer_asr">Asr</string>
-    <string name="prayer_maghrib">Maghrib</string>
-    <string name="prayer_isha">Isha</string>
-    <string name="prayer_in">in %1$s</string>
-    <string name="prayer_hours_minutes">%1$d h %2$d min</string>
-    <string name="prayer_minutes">%1$d min</string>
-    <string name="prayer_now">now</string>
+
+
+
+
+
     <string name="dock_list">Dock apps and order</string>
     <string name="dock_edit_place_hint">EDIT DOCK  •  CHOOSE A PLACE, THEN OK  •  BACK EXIT</string>
     <string name="dock_edit_app_hint">EDIT DOCK  •  CHOOSE THE APP FOR THIS PLACE, THEN OK  •  BACK</string>
     <string name="apps_per_row">Apps per row</string>
     <string name="advanced_effects">Advanced effects</string>
+    <string name="app_menu_move">Move</string>
+    <string name="app_menu_settings">App settings</string>
+    <string name="app_menu_uninstall">Uninstall...</string>
+    <string name="continue_title">Continue</string>
+    <string name="continue_hint">Recent unfinished items and next episodes shared by your apps.</string>
+    <string name="continue_permission_info">Allow TV listings access to read Continue watching entries shared by installed apps. Nothing is sent to a server.</string>
+    <string name="continue_allow">Allow TV listings access</string>
+    <string name="continue_loading">Loading...</string>
+    <string name="continue_error">The TV could not provide the list. Close and try again.</string>
+    <string name="continue_empty">No shared items yet. Play and pause something in a compatible app, then check here again. Some apps do not share their progress.</string>
+    <string name="continue_busy">A previous request is finishing. Close and try again.</string>
+    <string name="continue_resume">Resume</string>
+    <string name="continue_next">Next episode</string>
+    <string name="next_wallpaper">Next wallpaper</string>
+    <string name="wallpaper_published">Published %1$s</string>
 </resources>
