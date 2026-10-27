@@ -1,6 +1,6 @@
-# Continuar (Continue watching)
+# Continue watching
 
-Home reserves the final favourites slot for Continuar. Its previous app remains available in the
+Home reserves the final favourites slot for Continue. Its previous app remains available in the
 app drawer; the saved dock list is not silently overwritten on upgrade. The list editor and
 in-place reorder operate on the remaining five app slots. The reserved slot cannot be uninstalled
 or moved. OK opens a dark frosted panel above the dock; Up/Down navigate, OK opens the provider's
@@ -80,7 +80,7 @@ Crunchyroll rows include ten Continue and two Next entries. No hidden/completed/
 apply to Disney+, Crunchyroll or VLC. Netflix's 17 preview programs are in a separate channel,
 all have resolvable publisher-bound links, but none provides positive position or duration. None
 of its three channel labels matched continuation keywords. This does not establish unfinished
-viewing, so those preview programs were not merged into Continuar. Prime exposes one empty channel.
+viewing, so those preview programs were not merged into Continue. Prime exposes one empty channel.
 Installed Netflix current version: 8.3.11 build 12041; Prime: 6.24.12+v16.0.1.23-allAbis.
 
 Scope: a non-privileged reader sees only own/searchable rows. These results rule out our filters

@@ -11,13 +11,13 @@ See [credits and licenses](ATTRIBUTIONS.md). This is an independent personal for
 
 ## Features
 
-- Five editable favourites plus a fixed **Continuar** button in the top row.
+- Five editable favourites plus a fixed **Continue** button in the top row.
 - A dark, frosted drawer that opens when navigating down, with configurable apps per row.
-- Clock, date and Open-Meteo weather; complete Spanish menu translations.
+- Clock, date and Open-Meteo weather; English and complete Spanish menus.
 - Rotating local wallpapers with photographer credits, publication date, location and
   photographer caption when verified metadata is available. No generated alt text.
 - Full-colour ARGB8888 decoding; curated images are 1920 x 1080 WebP quality 90.
-- **Siguiente fondo** advances immediately. The comparison-quality switch has been removed.
+- **Next wallpaper** advances immediately. The comparison-quality switch has been removed.
 - Continue watching lists up to ten unfinished items or next episodes published by installed
   apps through Android TV's Watch Next provider. Availability depends on each streaming app.
 - Long-press to move an app, open its Android settings (including Force stop), or request
@@ -25,8 +25,7 @@ See [credits and licenses](ATTRIBUTIONS.md). This is an independent personal for
 - Optional module cards. Forslag has not been integrated or tested as an add-on here.
 
 Prayer times, athkar, Now Playing, accessibility key services and the replacement screensaver
-were removed. The TV's existing screensaver remains in use. Drive sign-in and automatic
-Unsplash photo discovery are not implemented.
+were removed. The TV's existing screensaver remains in use.
 
 ## Build
 
@@ -77,7 +76,7 @@ package IDs belong to upstream and they can alter unrelated TV settings.
 
 No accounts, analytics, notification listener, accessibility service or broad storage
 permission. The five permissions are Internet, network state, Wi-Fi state, request
-uninstall and read TV listings. TV-listings consent is requested when enabling Continuar;
+uninstall and read TV listings. TV-listings consent is requested when enabling Continue;
 request-uninstall only opens Android's confirmation.
 
 The TV's built-in network clients allow HTTPS only to Bing and Open-Meteo, reject redirects,

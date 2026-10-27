@@ -47,7 +47,7 @@ style/dependency notices; this is not a complete dependency vulnerability certif
 
 - Bing archive HTTPS succeeds on Android 9 with ordinary certificate verification.
 - Wallpapers display and change across five-minute slots, with credits. A later launch restores
-  cached imagery and the glass backdrop. No topic filter or Drive integration is included yet.
+  cached imagery and the glass backdrop.
 - Clock, Spanish date and live weather for Aldeamayor de San Martín display correctly.
 - Dock launches Netflix; returning to the preview restores the wallpaper. No playback was started.
 - App drawer and D-pad navigation tested through ADB; physical remote acceptance remains pending.
@@ -127,7 +127,7 @@ Verified both HOME intent resolution and actual resumed activity after pressing 
 Google launcher package/data are retained. Rollback: `restore-google-home.ps1` re-enables Google
 and selects it as Home. Reboot persistence has not been tested in this step.
 
-## Home 1.7 Continuar
+## Home 1.7 Continue
 
 Reserved last dock slot opens an upward frosted list of the ten newest usable Continue/Next
 entries shared through Android TV's provider. Last dock app remains in drawer. READ_TV_LISTINGS
@@ -147,7 +147,7 @@ security constraints, service compatibility and which cases were unit-tested vs 
 195.1 MiB; WebP 90 set: 109.4 MiB. Both installed temporarily for comparison (304.6 MiB payload;
 TV reports about 350 MiB free). Originals in Downloads remain untouched. User accepted WebP 90;
 this update selects it once by default while retaining the Original/WebP 90 comparison switch.
-Settings > Siguiente fondo advances instantly. No storage or other permission added.
+Settings > Next wallpaper advances instantly. No storage or other permission added.
 
 App-specific external files are authenticated using a signed catalogue and per-image SHA-256.
 Checks include canonical paths, strict names, bounded file sizes/pixels, domain-separated signatures
@@ -179,7 +179,7 @@ Removed rejected photo AOm3bb8cM-Y from inventory, active/prepared catalogues, T
 and generated workspace copies. The specified Downloads file was already absent. Existing metadata
 cache is retained for reuse but cannot reintroduce the photo because it is no longer in inventory.
 Background metadata syncing resumed. Installed exact APK byte-verified; menu checked on-TV for
-Siguiente fondo present and quality option absent. All 72 tests pass; lint zero errors.
+Next wallpaper present and quality option absent. All 72 tests pass; lint zero errors.
 
 
 ## Spanish menus - 27 October 2026

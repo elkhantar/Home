@@ -5,7 +5,7 @@
 The final personal collection contains **366 photos: 124 nature and 242 landscapes**,
 **135.2 MiB** total, all 1920x1080 WebP quality 90. Source crops are scaled with Lanczos,
 without any additional crop. The quality comparison switch and comparison JPEGs have been
-removed from the TV. **Siguiente fondo** remains. Full-colour ARGB8888 decoding is enabled.
+removed from the TV. **Next wallpaper** remains. Full-colour ARGB8888 decoding is enabled.
 Metadata enrichment is independent and continues as the API allowance permits.
 The dated sections below retain the rollout history and superseded comparison experiments.
 
@@ -55,10 +55,10 @@ comparison; no original was deleted from the TV or PC during this rollout.
 
 Local images replace Bing when a signed local catalogue is present. Five-minute rotation and the
 existing photo scrim, top gradient, glass blur and transitions remain. The collection has a stable
-shuffle, so metadata updates and quality switches do not reorder it. Settings > Siguiente fondo
-advances immediately. Settings > Calidad de fondos toggles Original / WebP 90 for the same photo.
+shuffle, so metadata updates and quality switches do not reorder it. Settings > Next wallpaper
+advances immediately. Settings > Wallpaper quality toggles Original / WebP 90 for the same photo.
 After the user accepted WebP 90, the next update defaults to WebP 90 once while retaining the
-comparison switch. The top row remains five apps plus Continuar (six slots total).
+comparison switch. The top row remains five apps plus Continue (six slots total).
 
 Curated decoding uses ARGB8888: the previous shared RGB565 preference could introduce banding
 regardless of whether the source was JPEG or WebP. At 1080p this adds about 4 MiB per live decoded
@@ -70,7 +70,7 @@ quantization; it cannot fix banding already in source images, panel or downstrea
 The TV receives only a signed caption catalogue. The Unsplash API credential stays on the PC.
 Verified photographer names, publication dates, locations and photographer captions are used as
 available; missing fields remain blank. Alt text is excluded. Publication dates are explicitly
-labelled Publicado, not presented as date taken. Photographer credit is placed before descriptive
+labelled Published, not presented as date taken. Photographer credit is placed before descriptive
 text so a long caption does not hide the attribution in the single-line footer.
 
 PC tools at the workspace root prepare files, fetch metadata with the official API, and publish

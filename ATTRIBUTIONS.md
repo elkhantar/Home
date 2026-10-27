@@ -74,9 +74,8 @@ collection or photographer descriptions are bundled with Home's source or APK.
   their original provenance is CleanXiaomiTV. Where an individual photo credit was not supplied,
   do not assume that MIT conveys that photo's copyright or reuse it as a wallpaper collection.
 
-The metadata fetcher is an offline enrichment tool for an existing user-owned selection,
-not an Unsplash discovery/download client. A future public API integration needs a separate
-review of attribution links, API rate limits, hotlinking and download-tracking obligations.
+The metadata fetcher enriches an existing user-owned selection through the Unsplash API.
+Its use is subject to the provider's API terms and rate limits.
 
 Netflix, Prime Video, Disney+, Crunchyroll, Google, Xiaomi, Unsplash and other product names,
 app icons and marks belong to their respective owners. Installed apps supply their own
